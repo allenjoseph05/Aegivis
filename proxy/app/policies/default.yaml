@@ -1,0 +1,123 @@
+# AgentBlackBox — Default Policy Rules
+# These policies are applied to every AI agent session by default.
+# Edit or override via ABB_POLICY_YAML env var pointing to a custom file.
+#
+# Actions:
+#   BLOCK      - Reject the request with 403 (before forwarding to LLM)
+#   ALERT      - Log warning + emit policy violation record to backend
+#   RATE_LIMIT - Return 429 with Retry-After
+#   LOG        - Record the event in violation log only (non-blocking)
+#
+# Conditions use AND logic (all conditions must be true for rule to fire).
+
+rules:
+  # ── Safety guardrails ──────────────────────────────────────────────────────
+
+  - name: tool-call-loop-protection
+    event_types: ["TOOL_CALL_START"]
+    conditions:
+      - field: tool_call_count
+        op: gt
+        value: 50
+    action: BLOCK
+    reason: "Agent exceeded 50 tool calls in one session — possible infinite loop. Stop and investigate."
+    enabled: true
+
+  - name: runaway-llm-call-protection
+    event_types: ["LLM_CALL_START"]
+    conditions:
+      - field: llm_call_count
+        op: gt
+        value: 100
+    action: BLOCK
+    reason: "Agent made more than 100 LLM calls in one session — runaway agent detected."
+    enabled: true
+
+  # ── PII detection alerts ───────────────────────────────────────────────────
+
+  - name: pii-in-tool-output
+    event_types: ["TOOL_CALL_END"]
+    conditions:
+      - field: pii_detected
+        op: not_empty
+    action: ALERT
+    reason: "PII detected in tool output — verify this data should be accessible to the agent."
+    enabled: true
+
+  - name: pii-in-llm-request
+    event_types: ["LLM_CALL_START"]
+    conditions:
+      - field: pii_detected
+        op: not_empty
+    action: ALERT
+    reason: "PII detected in LLM request payload — ensure data handling complies with privacy policy."
+    enabled: true
+
+  - name: sensitive-pii-types-critical
+    event_types: ["LLM_CALL_START", "TOOL_CALL_START", "TOOL_CALL_END"]
+    conditions:
+      - field: pii_detected
+        op: any_in
+        value: ["US_SSN", "CREDIT_CARD", "IBAN_CODE", "MEDICAL_LICENSE", "US_PASSPORT"]
+    action: ALERT
+    reason: "Highly sensitive PII type detected (SSN/credit card/passport/medical ID). Immediate review required."
+    enabled: true
+
+  # ── Performance alerts ─────────────────────────────────────────────────────
+
+  - name: high-latency-alert
+    event_types: ["LLM_CALL_END"]
+    conditions:
+      - field: latency_ms
+        op: gt
+        value: 30000
+    action: ALERT
+    reason: "LLM call latency exceeded 30 seconds — provider may be degraded."
+    enabled: true
+
+  # ── Error monitoring ───────────────────────────────────────────────────────
+
+  - name: provider-5xx-error
+    event_types: ["SYSTEM_ERROR"]
+    conditions:
+      - field: http_status
+        op: gte
+        value: 500
+    action: ALERT
+    reason: "LLM provider returned a 5xx server error."
+    enabled: true
+
+  - name: provider-auth-error
+    event_types: ["SYSTEM_ERROR"]
+    conditions:
+      - field: http_status
+        op: in
+        value: [401, 403]
+    action: ALERT
+    reason: "LLM provider authentication failed — check API key configuration."
+    enabled: true
+
+  # ── Model governance ───────────────────────────────────────────────────────
+
+  # Uncomment and customize to enforce model allowlists:
+  # - name: unapproved-model-block
+  #   event_types: ["LLM_CALL_START"]
+  #   conditions:
+  #     - field: model
+  #       op: not_in
+  #       value: ["gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet-20241022"]
+  #   action: BLOCK
+  #   reason: "Agent attempted to use an unapproved model."
+  #   enabled: false
+
+  # ── Rate limiting ──────────────────────────────────────────────────────────
+
+  - name: long-session-warning
+    event_types: ["LLM_CALL_START"]
+    conditions:
+      - field: session_duration_ms
+        op: gt
+        value: 3600000
+    action: ALERT
+    reason: "Agent session has been running for more than 1 hour — verify this is expected."
+    enabled: true

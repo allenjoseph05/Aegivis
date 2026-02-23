@@ -1,0 +1,92 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  proxy-tests:
+    name: Proxy Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install proxy dependencies
+        working-directory: proxy
+        run: |
+          pip install -e .
+          pip install pytest pytest-asyncio httpx respx
+
+      - name: Run proxy tests
+        working-directory: proxy
+        run: pytest tests/ -v --tb=short
+
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: abb
+          POSTGRES_PASSWORD: abb
+          POSTGRES_DB: agentblackbox_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -e ".[dev]"
+
+      - name: Run Alembic migrations
+        working-directory: backend
+        env:
+          ABB_DATABASE_URL: postgresql+asyncpg://abb:abb@localhost:5432/agentblackbox_test
+        run: alembic upgrade head
+
+      - name: Run backend tests
+        working-directory: backend
+        env:
+          ABB_DATABASE_URL: postgresql+asyncpg://abb:abb@localhost:5432/agentblackbox_test
+        run: pytest tests/ -v --tb=short
+
+  dashboard-build:
+    name: Dashboard Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm install
+
+      - name: Build dashboard
+        working-directory: dashboard
+        run: npm run build

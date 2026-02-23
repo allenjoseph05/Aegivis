@@ -1,0 +1,244 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://agentblackbox.io/schema/v1/events.json",
+  "title": "AgentBlackBox Canonical Event Schema",
+  "version": "1.0",
+  "definitions": {
+    "EventType": {
+      "type": "string",
+      "enum": [
+        "LLM_CALL_START",
+        "LLM_CALL_END",
+        "TOOL_CALL_START",
+        "TOOL_CALL_END",
+        "AGENT_FINISH",
+        "SYSTEM_ERROR",
+        "CHECKPOINT"
+      ]
+    },
+    "InterceptionLayer": {
+      "type": "string",
+      "enum": ["proxy", "otel", "sdk", "ebpf"]
+    },
+    "Provider": {
+      "type": "string",
+      "enum": ["openai", "anthropic", "google", "azure", "ollama", "unknown"]
+    },
+    "Message": {
+      "type": "object",
+      "properties": {
+        "role": { "type": "string", "enum": ["system", "user", "assistant", "tool", "function"] },
+        "content": { "type": ["string", "null"] },
+        "tool_call_id": { "type": ["string", "null"] },
+        "name": { "type": ["string", "null"] }
+      },
+      "required": ["role"]
+    },
+    "ToolDefinition": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": ["string", "null"] },
+        "parameters": { "type": ["object", "null"] }
+      },
+      "required": ["name"]
+    },
+    "ToolCall": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "arguments": { "type": ["string", "object"] }
+      },
+      "required": ["id", "name", "arguments"]
+    },
+    "TokenUsage": {
+      "type": "object",
+      "properties": {
+        "prompt_tokens": { "type": ["integer", "null"] },
+        "completion_tokens": { "type": ["integer", "null"] },
+        "total_tokens": { "type": ["integer", "null"] }
+      }
+    },
+    "LLMCallStartPayload": {
+      "type": "object",
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/Message" }
+        },
+        "tools_available": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ToolDefinition" }
+        },
+        "temperature": { "type": ["number", "null"] },
+        "max_tokens": { "type": ["integer", "null"] },
+        "stream": { "type": ["boolean", "null"] },
+        "extra_params": { "type": ["object", "null"] }
+      },
+      "required": ["messages"]
+    },
+    "LLMCallEndPayload": {
+      "type": "object",
+      "properties": {
+        "response_text": { "type": ["string", "null"] },
+        "finish_reason": { "type": ["string", "null"] },
+        "tool_calls": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ToolCall" }
+        },
+        "token_usage": { "$ref": "#/definitions/TokenUsage" },
+        "latency_ms": { "type": ["number", "null"] },
+        "http_status": { "type": ["integer", "null"] }
+      }
+    },
+    "ToolCallStartPayload": {
+      "type": "object",
+      "properties": {
+        "tool_name": { "type": "string" },
+        "tool_description": { "type": ["string", "null"] },
+        "tool_input": { "type": ["object", "string", "null"] },
+        "tool_call_id": { "type": "string" }
+      },
+      "required": ["tool_name", "tool_call_id"]
+    },
+    "ToolCallEndPayload": {
+      "type": "object",
+      "properties": {
+        "tool_name": { "type": "string" },
+        "tool_call_id": { "type": "string" },
+        "tool_output_masked": { "type": ["string", "null"] },
+        "tool_output_hash": { "type": ["string", "null"] },
+        "pii_fields_detected": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "success": { "type": "boolean" }
+      },
+      "required": ["tool_name", "tool_call_id"]
+    },
+    "AgentFinishPayload": {
+      "type": "object",
+      "properties": {
+        "final_output": { "type": ["string", "null"] },
+        "total_llm_calls": { "type": "integer" },
+        "total_tool_calls": { "type": "integer" },
+        "session_duration_ms": { "type": ["number", "null"] }
+      }
+    },
+    "SystemErrorPayload": {
+      "type": "object",
+      "properties": {
+        "error_code": { "type": ["string", "integer", "null"] },
+        "error_message": { "type": "string" },
+        "provider": { "type": "string" },
+        "http_status": { "type": ["integer", "null"] }
+      },
+      "required": ["error_message"]
+    },
+    "CheckpointPayload": {
+      "type": "object",
+      "properties": {
+        "merkle_root": { "type": "string" },
+        "events_covered": { "type": "integer" },
+        "from_sequence": { "type": "integer" },
+        "to_sequence": { "type": "integer" }
+      },
+      "required": ["merkle_root", "events_covered", "from_sequence", "to_sequence"]
+    },
+    "AuditEvent": {
+      "type": "object",
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "description": "ULID — lexicographically sortable by time"
+        },
+        "schema_version": {
+          "type": "string",
+          "default": "1.0"
+        },
+        "org_id": {
+          "type": "string",
+          "description": "Organization identifier"
+        },
+        "session_id": {
+          "type": "string",
+          "description": "Conversation/run session identifier"
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent identifier (from header or auto-detected)"
+        },
+        "provider": {
+          "$ref": "#/definitions/Provider"
+        },
+        "model": {
+          "type": "string",
+          "description": "LLM model name (e.g. gpt-4o, claude-3-5-sonnet)"
+        },
+        "interception_layer": {
+          "$ref": "#/definitions/InterceptionLayer"
+        },
+        "run_id": {
+          "type": "string",
+          "description": "UUID linking start/end event pairs"
+        },
+        "parent_run_id": {
+          "type": ["string", "null"],
+          "description": "Links tool calls to the LLM call that triggered them"
+        },
+        "event_type": {
+          "$ref": "#/definitions/EventType"
+        },
+        "payload": {
+          "type": "object",
+          "description": "Event-specific fields (PII-masked)"
+        },
+        "payload_hash": {
+          "type": ["string", "null"],
+          "description": "SHA-256 of original pre-masking payload (forensic proof)"
+        },
+        "pii_detected": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of PII entity types found (e.g. PERSON, EMAIL_ADDRESS)"
+        },
+        "timestamp_ns": {
+          "type": "integer",
+          "description": "Unix timestamp in nanoseconds"
+        },
+        "sequence_number": {
+          "type": "integer",
+          "description": "Monotonically increasing per session"
+        },
+        "previous_hash": {
+          "type": "string",
+          "description": "SHA-256 of previous event (GENESIS_<session_id> for first)"
+        },
+        "current_hash": {
+          "type": "string",
+          "description": "SHA-256 of this event envelope excluding current_hash field"
+        }
+      },
+      "required": [
+        "event_id",
+        "schema_version",
+        "org_id",
+        "session_id",
+        "agent_id",
+        "provider",
+        "model",
+        "interception_layer",
+        "run_id",
+        "event_type",
+        "payload",
+        "pii_detected",
+        "timestamp_ns",
+        "sequence_number",
+        "previous_hash",
+        "current_hash"
+      ]
+    }
+  },
+  "$ref": "#/definitions/AuditEvent"
+}
