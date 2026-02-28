@@ -185,24 +185,35 @@ class PolicyEngine:
     def _get_field(self, field_name: str, event: dict, session_state: dict) -> Any:
         payload = event.get("payload", {}) or {}
 
+        security = event.get("security") or {}
+
         mapping: dict[str, Any] = {
-            "event_type":          event.get("event_type"),
-            "pii_detected":        event.get("pii_detected", []),
-            "provider":            event.get("provider"),
-            "model":               event.get("model"),
-            "sequence_number":     event.get("sequence_number", 0),
-            "agent_id":            event.get("agent_id"),
-            "tool_name":           payload.get("tool_name"),
-            "latency_ms":          payload.get("latency_ms"),
-            "finish_reason":       payload.get("finish_reason"),
-            "http_status":         payload.get("http_status"),
-            "error_message":       payload.get("error_message", ""),
-            "tool_call_count":     session_state.get("tool_call_count", 0),
-            "llm_call_count":      session_state.get("llm_call_count", 0),
-            "session_duration_ms": (
+            "event_type":           event.get("event_type"),
+            "pii_detected":         event.get("pii_detected", []),
+            "provider":             event.get("provider"),
+            "model":                event.get("model"),
+            "sequence_number":      event.get("sequence_number", 0),
+            "agent_id":             event.get("agent_id"),
+            "tool_name":            payload.get("tool_name"),
+            "latency_ms":           payload.get("latency_ms"),
+            "finish_reason":        payload.get("finish_reason"),
+            "http_status":          payload.get("http_status"),
+            "error_message":        payload.get("error_message", ""),
+            "tool_call_count":      session_state.get("tool_call_count", 0),
+            "llm_call_count":       session_state.get("llm_call_count", 0),
+            "session_duration_ms":  (
                 (time.time_ns() - session_state.get("started_at_ns", time.time_ns())) / 1_000_000
                 if "started_at_ns" in session_state else 0
             ),
+            # Security scan results (populated by Phase 3.1 scanning)
+            # LLM_CALL_START fields (injection + credential)
+            "injection_score":      security.get("injection_score", 0.0),
+            "credential_detected":  security.get("credential_detected", False),
+            # TOOL_CALL_START fields (RCE + SSRF)
+            "rce_detected":         security.get("rce_detected", False),
+            "rce_confidence":       security.get("rce_confidence", 0.0),
+            "ssrf_detected":        security.get("ssrf_detected", False),
+            "ssrf_category":        security.get("ssrf_category", "none"),
         }
 
         if field_name in mapping:
@@ -211,6 +222,10 @@ class PolicyEngine:
         # payload.<key> accessor
         if field_name.startswith("payload."):
             return payload.get(field_name[8:])
+
+        # security.<key> accessor — read any sub-field from the security dict
+        if field_name.startswith("security."):
+            return security.get(field_name[9:])
 
         return None
 

@@ -2,15 +2,26 @@
 #   docker compose up -d
 #
 # Services:
-#   postgres  :5432  — PostgreSQL 16 (append-only audit events)
+#   postgres  :5432  — TimescaleDB 2 / PostgreSQL 16 (time-series audit events)
+#   redis     :6379  — Redis 7 (session state + event streaming pipeline)
 #   backend   :8000  — FastAPI REST API + event ingestion
 #   proxy     :8080  — LLM proxy (intercepts all LLM calls)
 #   dashboard :5173  — React dashboard
+#
+# Multi-org setup (add a second org after running migrations):
+#
+#   docker exec abb-postgres psql -U abb -d agentblackbox -c \
+#     "INSERT INTO api_keys (org_id, key_hash, name)
+#      VALUES ('acme-corp', encode(sha256('acme-secret-key'::bytea),'hex'), 'Acme Corp');"
+#
+# Then configure your proxy and dashboard for acme-corp:
+#   ABB_BACKEND_API_KEY=acme-secret-key  (proxy)
+#   VITE_API_KEY=acme-secret-key         (dashboard)
 
 services:
-  # ─── PostgreSQL ────────────────────────────────────────────────────────────
+  # ─── TimescaleDB (PostgreSQL 16 + time-series extension) ───────────────────
   postgres:
-    image: postgres:16-alpine
+    image: timescale/timescaledb:latest-pg16   # drop-in replacement for postgres:16-alpine
     container_name: abb-postgres
     restart: unless-stopped
     environment:
@@ -27,6 +38,22 @@ services:
       timeout: 5s
       retries: 10
 
+  # ─── Redis (session state + event streaming) ──────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: abb-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   # ─── Backend ──────────────────────────────────────────────────────────────
   backend:
     build:
@@ -40,10 +67,14 @@ services:
       ABB_CORS_ORIGINS: '["http://localhost:5173", "http://dashboard:5173"]'
       ABB_LOG_LEVEL: INFO
       ABB_DEBUG: "false"
+      # Redis: enables stream consumer (proxy → Redis → backend)
+      ABB_REDIS_URL: "redis://redis:6379/0"
     ports:
       - "8000:8000"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
@@ -56,6 +87,8 @@ services:
     build:
       context: ./proxy
       dockerfile: Dockerfile
+      args:
+        BUILD_EXTRAS: ${PROXY_BUILD_EXTRAS:-pii,security,classifier,ml,benchmark}
     container_name: abb-proxy
     restart: unless-stopped
     environment:
@@ -64,21 +97,31 @@ services:
       ABB_ORG_ID: default-org
       ABB_LOG_LEVEL: INFO
       ABB_PII_ENABLED: "true"
-      # Upstream LLM provider URLs (defaults are public APIs)
       ABB_OPENAI_UPSTREAM: https://api.openai.com
       ABB_ANTHROPIC_UPSTREAM: https://api.anthropic.com
       ABB_GOOGLE_UPSTREAM: https://generativelanguage.googleapis.com
       ABB_OLLAMA_UPSTREAM: http://host.docker.internal:11434
-      # Pass API keys from your .env file — never hardcode them here
+      ABB_ANALYSIS_CLASSIFIER_SYNC_ENABLED: "true"
+      ABB_ANALYSIS_CLASSIFIER_ENABLED: "true"
+      ABB_ANALYSIS_CLASSIFIER_SECOND_ENABLED: "true"
+      ABB_SECURITY_TOOL_OUTPUT_ML_SCAN_ENABLED: "true"
+      # Redis: enables distributed session state (multi-proxy) and stream pipeline
+      ABB_REDIS_URL: "redis://redis:6379/0"
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      HF_HOME: /hf_cache
+      HF_DATASETS_CACHE: /hf_cache/datasets
+    volumes:
+      - hf_cache:/hf_cache
     ports:
       - "8080:8080"
     depends_on:
       backend:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     extra_hosts:
-      - "host.docker.internal:host-gateway"   # for Ollama on host
+      - "host.docker.internal:host-gateway"
 
   # ─── Dashboard ────────────────────────────────────────────────────────────
   dashboard:
@@ -88,13 +131,71 @@ services:
     container_name: abb-dashboard
     restart: unless-stopped
     environment:
-      VITE_BACKEND_URL: ""          # empty = use Vite proxy (same-origin)
+      VITE_BACKEND_URL: ""          # empty = use nginx proxy (same-origin)
       VITE_API_KEY: dev-dashboard-key
     ports:
       - "5173:80"
     depends_on:
       - backend
 
+  # ─── Monitoring Stack (opt-in) ───────────────────────────────────────────
+  # Start with: docker compose --profile observability up -d
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: abb-prometheus
+    profiles: [observability]
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--web.enable-lifecycle"
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: abb-grafana
+    profiles: [observability]
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    container_name: abb-jaeger
+    profiles: [observability]
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+
 volumes:
   postgres_data:
     name: abb-postgres-data
+  redis_data:
+    name: abb-redis-data
+  hf_cache:
+    name: abb-hf-cache
+  prometheus_data:
+    name: abb-prometheus-data
+  grafana_data:
+    name: abb-grafana-data

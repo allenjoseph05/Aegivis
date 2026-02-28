@@ -30,6 +30,7 @@ async def insert_event(session: AsyncSession, event: dict) -> None:
         payload=event["payload"],
         payload_hash=event.get("payload_hash"),
         pii_detected=event.get("pii_detected", []),
+        security=event.get("security"),
         timestamp_ns=event["timestamp_ns"],
         sequence_number=event["sequence_number"],
         previous_hash=event["previous_hash"],

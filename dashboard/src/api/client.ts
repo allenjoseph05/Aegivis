@@ -3,7 +3,7 @@
  * All requests include the API key header.
  */
 import axios from "axios";
-import type { Anomaly, AuditEvent, Session } from "../types/events";
+import type { Anomaly, AgentMetrics, ModelMetrics, MetricsOverview, AuditEvent, Session } from "../types/events";
 
 const BASE_URL = import.meta.env.VITE_BACKEND_URL || "";
 const API_KEY = import.meta.env.VITE_API_KEY || "dev-dashboard-key";
@@ -19,7 +19,6 @@ const http = axios.create({
 // ─── Sessions ────────────────────────────────────────────────────────────────
 
 export interface ListSessionsParams {
-  org_id?: string;
   agent_id?: string;
   provider?: string;
   limit?: number;
@@ -40,20 +39,14 @@ export async function listSessions(
   return res.data;
 }
 
-export async function getSession(
-  sessionId: string,
-  orgId = "default-org"
-): Promise<Session> {
-  const res = await http.get(`/v1/sessions/${sessionId}`, {
-    params: { org_id: orgId },
-  });
+export async function getSession(sessionId: string): Promise<Session> {
+  const res = await http.get(`/v1/sessions/${sessionId}`);
   return res.data;
 }
 
 // ─── Events ──────────────────────────────────────────────────────────────────
 
 export interface GetEventsParams {
-  org_id?: string;
   limit?: number;
   offset?: number;
   event_type?: string;
@@ -86,13 +79,8 @@ export interface VerifyResult {
   checked_at: string;
 }
 
-export async function verifySession(
-  sessionId: string,
-  orgId = "default-org"
-): Promise<VerifyResult> {
-  const res = await http.get(`/v1/sessions/${sessionId}/verify`, {
-    params: { org_id: orgId },
-  });
+export async function verifySession(sessionId: string): Promise<VerifyResult> {
+  const res = await http.get(`/v1/sessions/${sessionId}/verify`);
   return res.data;
 }
 
@@ -161,13 +149,8 @@ export interface AnomalyFlag {
   metadata: Record<string, unknown>;
 }
 
-export async function getForensicReplay(
-  sessionId: string,
-  orgId = "default-org"
-): Promise<ForensicReplayResponse> {
-  const res = await http.get(`/v1/sessions/${sessionId}/replay`, {
-    params: { org_id: orgId },
-  });
+export async function getForensicReplay(sessionId: string): Promise<ForensicReplayResponse> {
+  const res = await http.get(`/v1/sessions/${sessionId}/replay`);
   return res.data;
 }
 
@@ -188,12 +171,10 @@ export interface ComplianceReportResponse {
 
 export async function generateComplianceReport(
   sessionId: string,
-  regulation: Regulation,
-  orgId = "default-org"
+  regulation: Regulation
 ): Promise<ComplianceReportResponse> {
   const res = await http.post("/v1/reports/generate", {
     session_id: sessionId,
-    org_id: orgId,
     regulation,
   });
   return res.data;
@@ -221,5 +202,432 @@ export async function listAnomalies(
   params: ListAnomaliesParams = {}
 ): Promise<ListAnomaliesResponse> {
   const res = await http.get("/v1/anomalies", { params });
+  return res.data;
+}
+
+// ─── Violations ───────────────────────────────────────────────────────────────
+
+export interface Violation {
+  id: number;
+  rule_name: string;
+  action: "BLOCK" | "ALERT" | "LOG";
+  reason: string;
+  event_type: string;
+  session_id: string;
+  agent_id: string;
+  org_id: string;
+  timestamp_ns: number;
+  received_at: string | null;
+}
+
+export interface ListViolationsParams {
+  session_id?: string;
+  agent_id?: string;
+  rule_name?: string;
+  action?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ListViolationsResponse {
+  violations: Violation[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export async function listViolations(
+  params: ListViolationsParams = {}
+): Promise<ListViolationsResponse> {
+  const res = await http.get("/v1/violations", { params });
+  return res.data;
+}
+
+export interface ViolationSummaryEntry {
+  rule_name: string;
+  action: string;
+  count: number;
+  last_fired_ns: number;
+}
+
+export async function getViolationsSummary(): Promise<{
+  summary: ViolationSummaryEntry[];
+}> {
+  const res = await http.get("/v1/violations/summary");
+  return res.data;
+}
+
+// ─── Metrics ──────────────────────────────────────────────────────────────────
+
+export async function getMetricsOverview(): Promise<MetricsOverview> {
+  const res = await http.get("/v1/metrics/overview");
+  return res.data;
+}
+
+export interface ListAgentMetricsParams {
+  agent_id?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ListAgentMetricsResponse {
+  agents: AgentMetrics[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export async function listAgentMetrics(
+  params: ListAgentMetricsParams = {}
+): Promise<ListAgentMetricsResponse> {
+  const res = await http.get("/v1/metrics/agents", { params });
+  return res.data;
+}
+
+export interface ListModelMetricsResponse {
+  models: ModelMetrics[];
+  total: number;
+}
+
+export async function listModelMetrics(): Promise<ListModelMetricsResponse> {
+  const res = await http.get("/v1/metrics/models");
+  return res.data;
+}
+
+// ─── Topology ─────────────────────────────────────────────────────────────────
+
+import type { TopologyGraph, TopologyFilters } from "../pages/Topology/topology.types";
+import type { SplunkPushRequest, ElasticPushRequest, PushResult } from "../pages/Export/export.types";
+
+export async function getTopology(
+  filters: TopologyFilters = { include_isolated: true, min_edge_calls: 1 }
+): Promise<TopologyGraph> {
+  const res = await http.get("/v1/topology", { params: filters });
+  return res.data;
+}
+
+// ─── SIEM Export ───────────────────────────────────────────────────────────────
+
+export async function pushToSplunk(req: SplunkPushRequest): Promise<PushResult> {
+  const res = await http.post("/v1/export/splunk", req);
+  return res.data;
+}
+
+export async function pushToElasticsearch(req: ElasticPushRequest): Promise<PushResult> {
+  const res = await http.post("/v1/export/elasticsearch", req);
+  return res.data;
+}
+
+// ─── Proxy — Tool Permissions ─────────────────────────────────────────────────
+
+const PROXY_URL =
+  import.meta.env.VITE_PROXY_URL || "http://localhost:8080";
+
+const proxyHttp = axios.create({
+  baseURL: PROXY_URL,
+  headers: { "Content-Type": "application/json" },
+});
+
+export interface ToolPermissionRule {
+  name: string;
+  tools: string[];
+  agents: string[];
+  except_tools: string[];
+  action: "BLOCK" | "ALERT" | "LOG";
+  reason: string;
+  enabled: boolean;
+  arg_conditions: Array<{
+    field: string;
+    op: string;
+    value?: unknown;
+  }>;
+}
+
+export interface ToolPermissionsResponse {
+  rules: ToolPermissionRule[];
+  total: number;
+  enabled: number;
+}
+
+export async function listToolPermissions(): Promise<ToolPermissionsResponse> {
+  const res = await proxyHttp.get("/tool-permissions");
+  return res.data;
+}
+
+export async function reloadToolPermissions(
+  rules?: ToolPermissionRule[]
+): Promise<{ status: string; rule_count: number; enabled_rule_count: number }> {
+  const body = rules ? { rules } : {};
+  const res = await proxyHttp.post("/tool-permissions/reload", body);
+  return res.data;
+}
+
+// ─── Proxy — Security Benchmark ───────────────────────────────────────────────
+
+export { PROXY_URL };
+
+export interface CaseResult {
+  text: string;
+  category: string;
+  expected: "attack" | "clean";
+  score: number;
+  detected: boolean;
+  blocked: boolean;
+  layer_scores: Record<string, number>;
+  threats: string[];
+  latency_ms: number;
+}
+
+export interface CategorySummary {
+  name: string;
+  total: number;
+  detected: number;
+  blocked: number;
+  detection_rate: number;
+  block_rate: number;
+}
+
+export interface BenchmarkReport {
+  run_at: string;
+  duration_s: number;
+  total_attacks: number;
+  total_clean: number;
+  true_positives: number;
+  false_negatives: number;
+  true_negatives: number;
+  false_positives: number;
+  tpr: number;
+  fpr: number;
+  precision: number;
+  f1: number;
+  accuracy: number;
+  latency_p50_ms: number;
+  latency_p95_ms: number;
+  latency_p99_ms: number;
+  latency_mean_ms: number;
+  categories: CategorySummary[];
+  active_layers: string[];
+  layer_coverage: Record<string, number>;
+  samples: CaseResult[];
+}
+
+export async function runBenchmark(): Promise<BenchmarkReport> {
+  const res = await proxyHttp.post("/benchmark/run");
+  return res.data;
+}
+
+export async function fetchLastBenchmark(): Promise<BenchmarkReport | null> {
+  const res = await proxyHttp.get("/benchmark/last");
+  return res.data ?? null;  // endpoint returns JSON null when no report exists yet
+}
+
+export async function runExternalBenchmark(): Promise<BenchmarkReport> {
+  const res = await proxyHttp.post("/benchmark/external/run");
+  return res.data;
+}
+
+export async function fetchLastExternalBenchmark(): Promise<BenchmarkReport | null> {
+  const res = await proxyHttp.get("/benchmark/external/last");
+  return res.data ?? null;  // endpoint returns JSON null when no report exists yet
+}
+
+// ─── Policy Builder ────────────────────────────────────────────────────────────
+
+export interface PolicyCondition {
+  field: string;
+  op: string;
+  value?: unknown;
+}
+
+export interface PolicyRule {
+  name: string;
+  event_types: string[];
+  conditions: PolicyCondition[];
+  action: "BLOCK" | "ALERT" | "RATE_LIMIT" | "LOG" | "ALLOW";
+  reason: string;
+  enabled: boolean;
+}
+
+export interface PolicyRulesResponse {
+  rules: PolicyRule[];
+}
+
+export interface ObservedTool {
+  agent_id: string;
+  tool_name: string;
+  call_count: number;
+  violation_count: number;
+  last_seen: string | null;
+}
+
+export interface ObservedToolsResponse {
+  tools: ObservedTool[];
+  window_days: number;
+  org_id: string;
+}
+
+/** Fetch active policy rules from the proxy */
+export async function listPolicyRules(): Promise<PolicyRulesResponse> {
+  const res = await proxyHttp.get("/policies");
+  return res.data;
+}
+
+/** Save updated policy rules to the proxy (hot-reload) */
+export async function savePolicyRules(rules: PolicyRule[]): Promise<{ status: string; rule_count: number }> {
+  const res = await proxyHttp.post("/policies/reload", { rules });
+  return res.data;
+}
+
+/** Observed tool usage per agent (backend) */
+export async function listObservedTools(days = 30): Promise<ObservedToolsResponse> {
+  const res = await http.get("/v1/policy/observed-tools", { params: { days } });
+  return res.data;
+}
+
+// ─── Policy Suggestions ────────────────────────────────────────────────────────
+
+export interface PolicySuggestion {
+  id: string;
+  title: string;
+  description: string;
+  evidence: string;
+  rule: PolicyRule;
+}
+
+export interface PolicySuggestionsResponse {
+  suggestions: PolicySuggestion[];
+  window_days: number;
+  total_events_analyzed: number;
+  insufficient_data: boolean;
+}
+
+/** Auto-generated policy rule suggestions derived from observed traffic */
+export async function getPolicySuggestions(days = 30): Promise<PolicySuggestionsResponse> {
+  const res = await http.get("/v1/policy/suggestions", { params: { days } });
+  return res.data;
+}
+
+// ─── Agent Registry ────────────────────────────────────────────────────────────
+
+export interface Agent {
+  agent_id: string;
+  name: string;
+  declared_purpose: string;
+  allowed_tools: string[];
+  owner: string | null;
+  registered_at: string;
+  updated_at: string;
+}
+
+export interface ListAgentsResponse {
+  agents: Agent[];
+  count: number;
+}
+
+export async function listAgents(): Promise<ListAgentsResponse> {
+  const res = await http.get("/v1/agents");
+  return res.data;
+}
+
+export async function registerAgent(body: {
+  agent_id: string;
+  name: string;
+  declared_purpose?: string;
+  allowed_tools?: string[];
+  owner?: string;
+}): Promise<{ status: string; agent_id: string }> {
+  const res = await http.post("/v1/agents", body);
+  return res.data;
+}
+
+export async function updateAgent(
+  agentId: string,
+  body: { name?: string; declared_purpose?: string; allowed_tools?: string[]; owner?: string }
+): Promise<{ status: string; agent_id: string }> {
+  const res = await http.patch(`/v1/agents/${agentId}`, body);
+  return res.data;
+}
+
+export async function deleteAgent(agentId: string): Promise<void> {
+  await http.delete(`/v1/agents/${agentId}`);
+}
+
+// ─── Compliance Audit Report ────────────────────────────────────────────────
+
+export type ComplianceFramework = "owasp_asi_2026" | "eu_ai_act" | "hipaa" | "soc2";
+
+export interface AuditControl {
+  id: string;
+  name: string;
+  status: "pass" | "partial" | "fail";
+  evidence: string;
+  violation_detail: Array<{ rule: string; action: string; count: number }>;
+}
+
+export interface AuditReportSummary {
+  total_sessions: number;
+  llm_calls: number;
+  tool_calls: number;
+  memory_blocked: number;
+  pii_events: number;
+  error_count: number;
+  agent_count: number;
+  avg_latency_ms: number | null;
+  blocked_count: number;
+  alert_count: number;
+  total_violations: number;
+  anomalies: number;
+  chain_verified_sessions: number;
+  chain_valid_pct: number;
+  overall_status: "pass" | "partial" | "fail";
+}
+
+export interface AuditReportViolation {
+  id: number;
+  rule_name: string;
+  action: string;
+  reason: string;
+  event_type: string;
+  session_id: string;
+  agent_id: string;
+  org_id: string;
+  timestamp_ns: number;
+}
+
+export interface AuditReportAgent {
+  agent_id: string;
+  name: string;
+  declared_purpose: string;
+  allowed_tools: string[];
+  owner: string | null;
+  registered_at: string | null;
+}
+
+export interface AuditReport {
+  report_id: string;
+  generated_at: string;
+  org_id: string;
+  framework: ComplianceFramework;
+  period: {
+    from_iso: string;
+    to_iso: string;
+    from_ts_ns: number;
+    to_ts_ns: number;
+  };
+  summary: AuditReportSummary;
+  controls: AuditControl[];
+  violations: AuditReportViolation[];
+  agents: AuditReportAgent[];
+}
+
+export interface AuditReportParams {
+  from_date?: string;
+  to_date?: string;
+  framework?: ComplianceFramework;
+  agent_id?: string;
+}
+
+export async function getAuditReport(params: AuditReportParams = {}): Promise<AuditReport> {
+  const res = await http.get("/v1/export/audit-report", { params });
   return res.data;
 }

@@ -17,12 +17,17 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .agent_identity import validate_agent_key
 from .config import settings
 from .intercept import InterceptContext
 from .policy import PolicyAction, get_policy_engine, reload_policy_engine
+from .tool_permissions import (
+    get_tool_permissions_engine,
+    reload_tool_permissions_engine,
+)
 from .providers import (
     AnthropicProvider,
     AzureProvider,
@@ -45,11 +50,15 @@ PROVIDERS = {
     "ollama": (OllamaProvider, settings.ollama_upstream),
 }
 
-# Headers that must not be forwarded upstream (proxy-internal)
+# Headers that must not be forwarded upstream (proxy-internal or computed)
+# content-length is excluded: httpx recomputes it from the actual body bytes,
+# which may differ from the original if spotlighting/canary modified the body.
 _HOP_BY_HOP = frozenset({
     "host", "connection", "keep-alive", "proxy-authenticate",
     "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
+    "content-length",
     "x-abb-session-id", "x-abb-agent-id", "x-abb-org-id",
+    "x-abb-parent-agent-id", "x-abb-parent-session-id",
 })
 
 # Paths that trigger LLM interception (intercept these, passthrough everything else)
@@ -79,6 +88,29 @@ async def lifespan(app: FastAPI):
         engine = get_policy_engine()
         logger.info(f"Policy engine loaded: {engine.rule_count} rules")
 
+    # Load tool permissions engine
+    if settings.tool_permissions_yaml:
+        reload_tool_permissions_engine(yaml_path=Path(settings.tool_permissions_yaml))
+    else:
+        tp_engine = get_tool_permissions_engine()
+        logger.info(
+            f"Tool permissions engine loaded: {tp_engine.rule_count} rules "
+            f"({tp_engine.enabled_rule_count} enabled)"
+        )
+
+    # Setup OpenTelemetry tracing (Phase 3.4)
+    if settings.otel_enabled:
+        from .tracing import setup_tracing
+        ok = setup_tracing(
+            service_name=settings.otel_service_name,
+            endpoint=settings.otel_endpoint,
+        )
+        if not ok:
+            logger.warning(
+                "OTel tracing requested (ABB_OTEL_ENABLED=true) but packages missing. "
+                "Install with: pip install 'agentblackbox-proxy[observability]'"
+            )
+
     # Background stale-session cleanup every 30 minutes
     async def _evict_loop():
         while True:
@@ -86,6 +118,7 @@ async def lifespan(app: FastAPI):
             get_session_tracker().evict_stale()
 
     evict_task = asyncio.create_task(_evict_loop(), name="abb-session-evict")
+
     buf_status = transport.buffer_status()
     logger.info(
         f"AgentBlackBox Proxy ready on {settings.host}:{settings.port} | "
@@ -107,6 +140,25 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     lifespan=lifespan,
+)
+
+# Mount Prometheus /metrics endpoint (Phase 3.4)
+# Optional: requires prometheus-client. No-op if not installed.
+if settings.metrics_enabled:
+    from .metrics import get_metrics_app
+    _metrics_asgi = get_metrics_app()
+    if _metrics_asgi is not None:
+        app.mount("/metrics", _metrics_asgi)
+        logger.info("Prometheus /metrics endpoint mounted")
+
+# Allow the dashboard (and any local dev origin) to call the management API.
+# The proxy management endpoints (/health, /policies, /tool-permissions) are
+# internal admin APIs — broad CORS is acceptable for a self-hosted tool.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
 )
 
 
@@ -131,9 +183,11 @@ def _get_abb_headers(request: Request) -> dict[str, str | None] | Response:
         )
 
     return {
-        "session_id": request.headers.get("x-abb-session-id"),
-        "agent_id": resolved_agent_id,
-        "org_id": request.headers.get("x-abb-org-id", settings.org_id),
+        "session_id":        request.headers.get("x-abb-session-id"),
+        "agent_id":          resolved_agent_id,
+        "org_id":            request.headers.get("x-abb-org-id", settings.org_id),
+        "parent_agent_id":   request.headers.get("x-abb-parent-agent-id") or None,
+        "parent_session_id": request.headers.get("x-abb-parent-session-id") or None,
     }
 
 
@@ -193,12 +247,17 @@ async def _proxy_and_capture(
     )
 
     # Process request (emit LLM_CALL_START + any pending TOOL_CALL_END)
-    session_id, run_id, violations = await context.process_request(
+    # Returns a 4-tuple: (session_id, run_id, violations, forward_body)
+    # forward_body is non-None when canary injection / spotlighting modified
+    # the messages that should be forwarded to the upstream LLM.
+    session_id, run_id, violations, forward_body = await context.process_request(
         request_data=body,
         provider=provider_name,
         model=model,
         agent_id=abb["agent_id"],
         explicit_session_id=abb["session_id"],
+        parent_agent_id=abb["parent_agent_id"],
+        parent_session_id=abb["parent_session_id"],
     )
 
     # Check for BLOCK violations — return 403 without forwarding to LLM
@@ -218,6 +277,12 @@ async def _proxy_and_capture(
                 "X-ABB-Session-ID": session_id,
             },
         )
+
+    # If canary injection / spotlighting modified the messages, re-serialize
+    # the body so the modified version is forwarded to the upstream LLM.
+    if forward_body is not None:
+        import json as _json2
+        body_bytes = _json2.dumps(forward_body).encode("utf-8")
 
     # Forward request upstream
     upstream_url = f"{upstream_base}{downstream_path}"
@@ -460,8 +525,9 @@ async def _passthrough(request: Request, upstream_base: str, path: str) -> Respo
 
 @app.get("/health")
 async def health():
-    engine = get_policy_engine()
-    tracker = get_session_tracker()
+    engine    = get_policy_engine()
+    tp_engine = get_tool_permissions_engine()
+    tracker   = get_session_tracker()
     transport = get_transport()
     buf = transport.buffer_status()
     return {
@@ -470,11 +536,49 @@ async def health():
         "version": "1.0.0",
         "providers": list(PROVIDERS.keys()),
         "policy_rules": engine.rule_count,
+        "tool_permission_rules": tp_engine.rule_count,
+        "tool_permission_rules_enabled": tp_engine.enabled_rule_count,
         "active_sessions": tracker.active_count(),
         "buffered_events": buf.get("events", 0),
         "buffered_violations": buf.get("violations", 0),
     }
 
+
+# ─── Admin API key guard ────────────────────────────────────────────────────
+
+def _require_admin_key(request: Request) -> JSONResponse | None:
+    """
+    Enforce the admin API key on management write endpoints.
+
+    Returns a JSONResponse 403 if authentication fails, None if it passes.
+    When ABB_ADMIN_API_KEY is empty (default), all callers are allowed
+    (suitable for local development / Docker Compose setups with no exposure).
+    """
+    required_key = settings.admin_api_key.strip()
+    if not required_key:
+        return None  # admin auth disabled — open access
+
+    provided_key = (
+        request.headers.get("X-ABB-Admin-Key")
+        or request.headers.get("x-abb-admin-key")
+        or ""
+    ).strip()
+
+    if not provided_key or provided_key != required_key:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "admin_auth_required",
+                "detail": (
+                    "This endpoint requires a valid X-ABB-Admin-Key header. "
+                    "Set ABB_ADMIN_API_KEY on the proxy to configure authentication."
+                ),
+            },
+        )
+    return None
+
+
+# ─── Policy engine endpoints ────────────────────────────────────────────────
 
 @app.get("/policies")
 async def list_policies():
@@ -487,8 +591,13 @@ async def reload_policies(request: Request):
     """
     Reload policy rules from JSON body or from default YAML file.
 
+    Requires X-ABB-Admin-Key header when ABB_ADMIN_API_KEY is configured.
     Body (optional): {"rules": [...]}
     """
+    auth_error = _require_admin_key(request)
+    if auth_error:
+        return auth_error
+
     try:
         body = await request.json()
         rules_data = body.get("rules")
@@ -504,3 +613,189 @@ async def reload_policies(request: Request):
         count = reload_policy_engine()
 
     return {"status": "reloaded", "rule_count": count}
+
+
+# ─── Tool permissions endpoints ─────────────────────────────────────────────
+
+@app.get("/tool-permissions")
+async def list_tool_permissions():
+    """
+    List all tool permission rules (enabled and disabled).
+
+    This is the live view of what the ToolPermissionsEngine is currently
+    evaluating.  All rules are shown; check the ``enabled`` field to see
+    which ones are active.
+    """
+    tp = get_tool_permissions_engine()
+    return {
+        "rules": tp.rules_summary(),
+        "total": tp.rule_count,
+        "enabled": tp.enabled_rule_count,
+    }
+
+
+@app.post("/tool-permissions/reload")
+async def reload_tool_permissions_api(request: Request):
+    """
+    Hot-reload tool permission rules from a JSON body or the configured YAML.
+
+    Requires X-ABB-Admin-Key header when ABB_ADMIN_API_KEY is configured.
+    Body (optional): {"rules": [...]}  -- list of rule dicts in YAML schema
+    No body          -- reload from ABB_TOOL_PERMISSIONS_YAML or bundled file
+    """
+    auth_error = _require_admin_key(request)
+    if auth_error:
+        return auth_error
+
+    try:
+        body = await request.json()
+        rules_data = body.get("rules")
+    except Exception:
+        rules_data = None
+
+    from pathlib import Path
+    if rules_data is not None:
+        count = reload_tool_permissions_engine(rules_data=rules_data)
+    elif settings.tool_permissions_yaml:
+        count = reload_tool_permissions_engine(
+            yaml_path=Path(settings.tool_permissions_yaml)
+        )
+    else:
+        count = reload_tool_permissions_engine()
+
+    tp = get_tool_permissions_engine()
+    return {
+        "status": "reloaded",
+        "rule_count": count,
+        "enabled_rule_count": tp.enabled_rule_count,
+    }
+
+
+# ─── Security Benchmark endpoints ───────────────────────────────────────────
+
+# In-memory cache — survives the process lifetime, resets on restart.
+_benchmark_cache: dict | None = None
+
+
+@app.get("/benchmark/last")
+async def get_last_benchmark():
+    """
+    Return the most recent benchmark report, or null if none has been run yet
+    (always HTTP 200 — avoids spurious browser console 404 errors).
+
+    The report is cached in memory and persists until the proxy restarts or
+    a new benchmark is run via POST /benchmark/run.
+    """
+    return _benchmark_cache  # None → JSON null (200); report dict when available
+
+
+@app.post("/benchmark/run")
+async def run_benchmark_endpoint():
+    """
+    Run the full security benchmark against the labelled attack dataset.
+
+    Executes synchronously in a thread-pool executor to avoid blocking the
+    event loop.  Returns the full BenchmarkReport as JSON and caches it.
+
+    Typical runtime: 0.5-5s (structural only) to 30-120s (with semantic/
+    classifier layers active).
+    """
+    global _benchmark_cache
+    try:
+        from .benchmark import run_benchmark
+        import asyncio
+        loop = asyncio.get_running_loop()
+        report = await loop.run_in_executor(None, run_benchmark)
+        _benchmark_cache = report.to_dict()
+        return _benchmark_cache
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Benchmark module unavailable: {exc}",
+        )
+    except Exception as exc:
+        logger.exception("Benchmark run failed: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Benchmark failed: {exc}",
+        )
+
+
+# ─── External Dataset Benchmark endpoints ─────────────────────────────────────
+
+_external_benchmark_cache: dict | None = None
+
+
+@app.get("/benchmark/external/last")
+async def get_last_external_benchmark():
+    """
+    Return the most recent external dataset benchmark report, or null if none
+    has been run yet (always HTTP 200 — avoids spurious browser console 404 errors).
+
+    External benchmarks run against real-world HuggingFace datasets:
+    deepset/prompt-injections, lmsys/toxic-chat, xTRam1/safe-guard-prompt-injection,
+    nvidia/Aegis-AI-Content-Safety-Dataset-1.0, fka/awesome-chatgpt-prompts.
+
+    Requires: pip install datasets
+    """
+    return _external_benchmark_cache  # None → JSON null (200); report dict when available
+
+
+@app.post("/benchmark/external/run")
+async def run_external_benchmark_endpoint():
+    """
+    Run the security benchmark against real-world HuggingFace datasets.
+
+    Uses streaming mode — only the rows we actually need are downloaded, so
+    the first run typically completes in 30-120s (vs 60+ min previously).
+
+    A hard wall-clock timeout is enforced (default 600s, configurable via
+    BENCHMARK_EXTERNAL_TIMEOUT_S env var).  If the benchmark does not complete
+    within that window a 504 is returned with guidance on reducing sample size.
+
+    Requires: pip install datasets
+    """
+    global _external_benchmark_cache
+    import os as _os
+    _timeout_s = int(_os.environ.get("BENCHMARK_EXTERNAL_TIMEOUT_S", "600"))
+    loop = asyncio.get_running_loop()
+    try:
+        from .benchmark import run_external_benchmark
+        report = await asyncio.wait_for(
+            loop.run_in_executor(None, run_external_benchmark),
+            timeout=_timeout_s,
+        )
+        _external_benchmark_cache = report.to_dict()
+        return _external_benchmark_cache
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"External benchmark timed out after {_timeout_s}s. "
+                "Reduce sample size with env vars: "
+                "BENCHMARK_EXT_MAX_ATTACKS (default 150), "
+                "BENCHMARK_EXT_MAX_CLEAN (default 75), "
+                "BENCHMARK_EXT_TOTAL_MAX (default 1200). "
+                "Or raise the deadline: BENCHMARK_EXTERNAL_TIMEOUT_S."
+            ),
+        )
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"HuggingFace 'datasets' library not installed on proxy. "
+                f"Run: pip install datasets  (error: {exc})"
+            ),
+        )
+    except RuntimeError as exc:
+        # load_external_cases() raises RuntimeError when all datasets fail
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+        )
+    except Exception as exc:
+        logger.exception("External benchmark run failed: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail=f"External benchmark failed: {exc}",
+        )

@@ -121,3 +121,147 @@ rules:
     action: ALERT
     reason: "Agent session has been running for more than 1 hour — verify this is expected."
     enabled: true
+  # -- Security: prompt injection (Phase 3.1) --------------------------------
+  # Thresholds mirror ABB_SECURITY_INJECTION_BLOCK_THRESHOLD and
+  # ABB_SECURITY_INJECTION_ALERT_THRESHOLD.  Tune via env vars only.
+
+  - name: prompt-injection-block
+    event_types: ["LLM_CALL_START"]
+    conditions:
+      - field: injection_score
+        op: gte
+        value: 0.80
+    action: BLOCK
+    reason: "High-confidence prompt injection detected (score >= 0.80). Request blocked before forwarding to LLM."
+    enabled: true
+
+  - name: prompt-injection-alert
+    event_types: ["LLM_CALL_START"]
+    conditions:
+      - field: injection_score
+        op: gte
+        value: 0.50
+      - field: injection_score
+        op: lt
+        value: 0.80
+    action: ALERT
+    reason: "Suspicious prompt injection pattern detected (score 0.50-0.79). Request allowed but flagged for review."
+    enabled: true
+
+  - name: credential-leak-alert
+    event_types: ["LLM_CALL_START"]
+    conditions:
+      - field: credential_detected
+        op: eq
+        value: true
+    action: ALERT
+    reason: "Potential API key or secret detected in LLM request. Verify no credentials are being leaked to the model."
+    enabled: true
+
+  # -- Security: RCE detection (Phase 3.1) -----------------------------------
+  # Fires when an agent's tool call arguments contain code that would execute
+  # OS commands, shell pipelines, or dangerous Python / SQL constructs.
+  # Threshold mirrors ABB_SECURITY_RCE_CONFIDENCE_THRESHOLD (default 0.70).
+
+  - name: rce-in-tool-args
+    event_types: ["TOOL_CALL_START"]
+    conditions:
+      - field: rce_detected
+        op: eq
+        value: true
+    action: BLOCK
+    reason: "Remote code execution pattern detected in tool call arguments. Request blocked to prevent agent-driven code injection."
+    enabled: true
+
+  # -- Security: SSRF detection (Phase 3.1) ----------------------------------
+  # Two separate rules distinguish HIGH-RISK cloud-metadata endpoints (always
+  # block — they serve IAM credentials) from MEDIUM-RISK private IPs (alert
+  # only — enterprise agents legitimately call internal APIs on 10.x.x.x).
+  #
+  # To allow internal API calls, set:
+  #   ABB_SECURITY_SSRF_ALLOWED_DOMAINS=myapi.internal,10.0.0.5
+  # To downgrade private-IP detection to LOG, change the action below.
+
+  - name: ssrf-cloud-metadata-block
+    event_types: ["TOOL_CALL_START"]
+    conditions:
+      - field: ssrf_category
+        op: eq
+        value: "cloud_metadata"
+    action: BLOCK
+    reason: "Tool call targets a cloud metadata endpoint (169.254.169.254). Blocked to prevent IAM credential theft."
+    enabled: true
+
+  - name: ssrf-private-ip-alert
+    event_types: ["TOOL_CALL_START"]
+    conditions:
+      - field: ssrf_detected
+        op: eq
+        value: true
+      - field: ssrf_category
+        op: neq
+        value: "cloud_metadata"
+    action: ALERT
+    reason: "Tool call targets a private/internal network address. Review access — set ABB_SECURITY_SSRF_ALLOWED_DOMAINS to allow known internal APIs."
+    enabled: true
+
+  # ── Context-aware multi-turn injection detection ──────────────────────────
+  # Fired by intercept.py directly (not evaluated by policy engine field match).
+  # Listed here for documentation and hot-reload awareness only.
+  - name: context-injection-block
+    event_types: ["LLM_CALL_START"]
+    conditions:
+      - field: injection_score
+        op: gte
+        value: 0.60
+    action: BLOCK
+    reason: "Multi-turn rolling injection score exceeds block threshold — Crescendo/gradual injection attack detected across session turns."
+    enabled: true
+
+  - name: context-injection-alert
+    event_types: ["LLM_CALL_START"]
+    conditions:
+      - field: injection_score
+        op: gte
+        value: 0.35
+    action: ALERT
+    reason: "Elevated injection signal sustained across multiple turns — possible gradual injection buildup."
+    enabled: true
+
+  # ── Token budget enforcement ──────────────────────────────────────────────
+  # Set ABB_RATE_LIMIT_MAX_TOKENS_PER_SESSION to a non-zero value to activate.
+  # Fired by intercept.py directly when state.total_tokens >= cap.
+  - name: token-budget-exceeded
+    event_types: ["LLM_CALL_START"]
+    conditions: []
+    action: BLOCK
+    reason: "Session token budget exhausted — configure ABB_RATE_LIMIT_MAX_TOKENS_PER_SESSION to set the cap."
+    enabled: false  # fired directly by intercept.py when cap > 0; empty conditions would match every call
+
+  - name: llm-call-budget-exceeded
+    event_types: ["LLM_CALL_START"]
+    conditions: []
+    action: BLOCK
+    reason: "Session LLM call budget exhausted — configure ABB_RATE_LIMIT_MAX_LLM_CALLS_PER_SESSION to set the cap."
+    enabled: false  # fired directly by intercept.py when cap > 0; empty conditions would match every call
+
+  # ── System prompt integrity (Phase 6) ─────────────────────────────────────
+  # Fired directly by intercept.py when the system prompt hash changes
+  # mid-session. Listed here for documentation and hot-reload awareness.
+  - name: system-prompt-mutation
+    event_types: ["LLM_CALL_START"]
+    conditions: []
+    action: BLOCK
+    reason: "System prompt changed mid-session — possible successful prompt injection or compromised orchestrator."
+    enabled: false  # fired directly by intercept.py; conditions not evaluated by policy engine
+
+  # ── Multi-agent spawn depth enforcement (Phase 6) ─────────────────────────
+  # Fired directly by intercept.py when spawn_depth > ABB_MAX_SPAWN_DEPTH.
+  # To change the limit: set ABB_MAX_SPAWN_DEPTH env var (default: 10).
+  # To disable: set ABB_MAX_SPAWN_DEPTH=0.
+  - name: spawn-depth-exceeded
+    event_types: ["LLM_CALL_START"]
+    conditions: []
+    action: BLOCK
+    reason: "Agent spawn depth limit exceeded — possible runaway delegation chain or compromised orchestrator."
+    enabled: false  # fired directly by intercept.py; depth configured via ABB_MAX_SPAWN_DEPTH
