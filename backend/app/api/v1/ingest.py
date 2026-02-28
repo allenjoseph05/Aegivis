@@ -24,7 +24,7 @@ from ...db.queries import (
     insert_anomalies,
     insert_event,
 )
-from ...middleware.auth import require_api_key
+from ...middleware.auth import OrgContext, require_api_key
 from ...services.anomaly import detect_anomalies
 from ...services.baseline import update_baseline
 from ...services.notifications import notify_anomalies
@@ -63,11 +63,12 @@ class IngestBatchResponse(BaseModel):
 async def ingest_events(
     batch: IngestBatchRequest,
     db: AsyncSession = Depends(get_session),
-    _api_key: str = Depends(require_api_key),
+    org_ctx: OrgContext = Depends(require_api_key),
 ) -> IngestBatchResponse:
     """
     Accepts a batch of audit events from the AgentBlackBox proxy.
     Validates each event, checks for duplicates, and persists to PostgreSQL.
+    Events whose org_id does not match the authenticated key are rejected.
     """
     accepted = 0
     skipped = 0
@@ -92,6 +93,15 @@ async def ingest_events(
         # Validate event type
         if event.get("event_type") not in VALID_EVENT_TYPES:
             errors.append(f"Event {event_id}: unknown event_type '{event.get('event_type')}'")
+            skipped += 1
+            continue
+
+        # Org isolation: reject events that don't belong to the authenticated org
+        if event.get("org_id") != org_ctx.org_id:
+            errors.append(
+                f"Event {event_id}: org_id '{event.get('org_id')}' does not match "
+                f"authenticated org '{org_ctx.org_id}'"
+            )
             skipped += 1
             continue
 
@@ -121,7 +131,7 @@ async def ingest_events(
             try:
                 await update_baseline(
                     db,
-                    org_id=event.get("org_id", "default-org"),
+                    org_id=org_ctx.org_id,
                     agent_id=event.get("agent_id", "unknown"),
                     session_stats={
                         "llm_call_count":      payload.get("total_llm_calls", 0),

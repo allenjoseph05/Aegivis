@@ -6,7 +6,6 @@ build-backend = "hatchling.build"
 name = "agentblackbox"
 version = "1.0.0"
 description = "AgentBlackBox SDK — forensic audit trail for AI agents"
-readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 keywords = ["ai", "audit", "compliance", "llm", "agent", "forensics"]

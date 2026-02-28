@@ -1,0 +1,195 @@
+# AgentBlackBox — Tool Permissions Configuration
+#
+# These rules are evaluated at every TOOL_CALL_START event, BEFORE the main
+# policy engine.  A BLOCK here prevents both the tool execution AND the
+# event from entering the audit log.
+#
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │  All rules below are DISABLED by default (enabled: false).              │
+# │  Copy and enable only the rules relevant to your deployment.            │
+# └──────────────────────────────────────────────────────────────────────────┘
+#
+# Rule fields:
+#   name          — unique identifier (used in violation records)
+#   tools         — list of exact tool names, OR ["*"] to match all tools
+#   agents        — optional list of agent IDs; omit or ["*"] for all agents
+#   except_tools  — allowlist used only when tools=["*"]
+#   arg_conditions — AND conditions evaluated against the tool arguments dict
+#                    (same operators as the main policy engine)
+#   action        — BLOCK | ALERT | LOG  (BLOCK stops execution; ALERT logs)
+#   reason        — human-readable explanation shown in violation records
+#   enabled       — set true to activate the rule
+
+permissions:
+
+  # ── Category 1: Unconditional tool blocks ────────────────────────────────
+  # Use these to prohibit dangerous tool categories entirely.
+
+  - name: block-direct-shell-execution
+    tools:
+      - execute_shell
+      - bash
+      - sh
+      - run_command
+      - system_exec
+      - terminal
+      - cmd
+    action: BLOCK
+    reason: >-
+      Direct shell execution tools are disabled.
+      Use approved task-specific tools instead.
+    enabled: false
+
+  - name: block-arbitrary-code-execution
+    tools:
+      - run_python
+      - run_code
+      - eval_code
+      - execute_code
+      - repl
+      - python_exec
+    action: BLOCK
+    reason: >-
+      Arbitrary code execution tools require explicit human approval.
+      Submit a change request to the security team to enable them.
+    enabled: false
+
+  - name: block-database-mutations
+    tools:
+      - execute_sql
+      - run_query
+      - db_write
+      - db_delete
+      - db_exec
+    action: BLOCK
+    reason: >-
+      Write-path database tools are blocked. Use the read-only query tool.
+    enabled: false
+
+  - name: block-file-deletion
+    tools:
+      - delete_file
+      - remove_file
+      - unlink
+      - rm
+      - move_to_trash
+    action: BLOCK
+    reason: >-
+      File deletion requires a human-approved workflow.
+      Agents may not delete files autonomously.
+    enabled: false
+
+  # ── Category 2: Per-agent restrictions ───────────────────────────────────
+  # Lock a specific agent to an approved set of tools.
+  #
+  # Pattern: tools=["*"] + except_tools=[approved list]
+  # This blocks everything EXCEPT the approved tools for the named agent.
+
+  - name: restrict-data-agent-to-read-only
+    tools:
+      - "*"
+    agents:
+      - data-agent
+      - analytics-bot
+    except_tools:
+      - search_web
+      - read_file
+      - list_directory
+      - query_db_readonly
+      - get_schema
+    action: BLOCK
+    reason: >-
+      Data agents are restricted to read-only tools.
+      Contact the platform team to expand the approved tool list.
+    enabled: false
+
+  - name: restrict-customer-agent
+    tools:
+      - "*"
+    agents:
+      - customer-support-agent
+    except_tools:
+      - search_knowledge_base
+      - get_ticket
+      - create_ticket
+      - send_email
+    action: BLOCK
+    reason: >-
+      Customer support agents may only use ticket and knowledge-base tools.
+    enabled: false
+
+  # ── Category 3: Argument-level input validation ───────────────────────────
+  # Block a tool when specific argument values are dangerous.
+  #
+  # arg_conditions use AND logic: all conditions must match to fire the rule.
+  # Operators: eq, neq, contains, not_contains, matches_regex, empty,
+  #            not_empty, gt, gte, lt, lte, in, not_in
+
+  - name: block-path-traversal-in-file-ops
+    tools:
+      - read_file
+      - write_file
+      - list_directory
+      - open_file
+    arg_conditions:
+      - field: path
+        op: matches_regex
+        value: "\\.\\."
+    action: BLOCK
+    reason: >-
+      Path traversal attempt (contains "..") detected in file tool argument.
+    enabled: false
+
+  - name: block-write-to-system-paths
+    tools:
+      - write_file
+      - create_file
+      - append_file
+    arg_conditions:
+      - field: path
+        op: matches_regex
+        value: "^/(etc|bin|sbin|usr/bin|boot|dev|proc|sys)"
+    action: BLOCK
+    reason: >-
+      Writes to system paths are prohibited.
+    enabled: false
+
+  - name: alert-on-external-url-in-tool
+    tools:
+      - http_request
+      - web_fetch
+      - curl
+      - api_call
+    arg_conditions:
+      - field: url
+        op: not_empty
+    action: ALERT
+    reason: >-
+      Outbound HTTP tool call detected. Verify the URL is on the
+      approved allowlist (ABB_SECURITY_SSRF_ALLOWED_DOMAINS).
+    enabled: false
+
+  # ── Category 4: High-value operation alerts ───────────────────────────────
+  # These alert (but don't block) on sensitive operations for audit purposes.
+
+  - name: alert-on-email-send
+    tools:
+      - send_email
+      - send_message
+      - post_to_slack
+      - create_calendar_event
+    action: ALERT
+    reason: >-
+      Outbound communication tool invoked. Recorded for audit trail.
+    enabled: false
+
+  - name: alert-on-payment-tool
+    tools:
+      - charge_card
+      - process_payment
+      - create_invoice
+      - transfer_funds
+    action: ALERT
+    reason: >-
+      Financial transaction tool invoked. Requires post-hoc review.
+    enabled: false

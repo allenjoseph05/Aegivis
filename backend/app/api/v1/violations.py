@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
 from ...db.connection import get_session
-from ...middleware.auth import require_api_key
+from ...middleware.auth import OrgContext, require_api_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -49,7 +49,7 @@ class ViolationResponse(BaseModel):
 async def ingest_violations(
     batch: ViolationBatch,
     db: AsyncSession = Depends(get_session),
-    _api_key: str = Depends(require_api_key),
+    org_ctx: OrgContext = Depends(require_api_key),
 ) -> ViolationResponse:
     accepted = 0
     errors: list[str] = []
@@ -70,7 +70,8 @@ async def ingest_violations(
                     "event_type": v.event_type,
                     "session_id": v.session_id,
                     "agent_id": v.agent_id,
-                    "org_id": v.org_id,
+                    # Force org_id from authenticated key — never trust client-supplied value
+                    "org_id": org_ctx.org_id,
                     "timestamp_ns": v.timestamp_ns,
                 },
             )
@@ -99,10 +100,10 @@ async def list_violations(
     limit: int = Query(100, le=500),
     offset: int = Query(0),
     db: AsyncSession = Depends(get_session),
-    _api_key: str = Depends(require_api_key),
+    org_ctx: OrgContext = Depends(require_api_key),
 ):
-    filters = []
-    params: dict = {"limit": limit, "offset": offset}
+    filters = ["org_id = :org_id"]
+    params: dict = {"limit": limit, "offset": offset, "org_id": org_ctx.org_id}
 
     if session_id:
         filters.append("session_id = :session_id")
@@ -117,7 +118,7 @@ async def list_violations(
         filters.append("action = :action")
         params["action"] = action
 
-    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    where = f"WHERE {' AND '.join(filters)}"
     sql = text(f"""
         SELECT id, rule_name, action, reason, event_type, session_id, agent_id,
                org_id, timestamp_ns, received_at
@@ -158,15 +159,16 @@ async def list_violations(
 )
 async def violations_summary(
     db: AsyncSession = Depends(get_session),
-    _api_key: str = Depends(require_api_key),
+    org_ctx: OrgContext = Depends(require_api_key),
 ):
     result = await db.execute(text("""
         SELECT rule_name, action, COUNT(*) as count,
                MAX(timestamp_ns) as last_fired_ns
         FROM policy_violations
+        WHERE org_id = :org_id
         GROUP BY rule_name, action
         ORDER BY count DESC
-    """))
+    """), {"org_id": org_ctx.org_id})
     rows = result.fetchall()
     return {
         "summary": [

@@ -22,6 +22,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+redis = [
+    # Redis Streams event pipeline + distributed session state
+    # Install with: pip install 'agentblackbox-backend[redis]'
+    "redis[asyncio]>=5.0",
+]
+observability = [
+    # Prometheus metrics endpoint (/metrics)
+    "prometheus-client>=0.21.0",
+    # OpenTelemetry distributed tracing
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-api>=1.27.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",

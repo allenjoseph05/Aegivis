@@ -51,6 +51,7 @@ class AuditEventORM(Base):
     payload = Column(JSONB, nullable=False)
     payload_hash = Column(Text, nullable=True)          # SHA-256 of pre-masking payload
     pii_detected = Column(ARRAY(Text), default=[])
+    security = Column(JSONB, nullable=True)             # Enforcement scan result (injection_score, etc.)
     timestamp_ns = Column(BigInteger, nullable=False)
     sequence_number = Column(Integer, nullable=False)
     previous_hash = Column(Text, nullable=False)
@@ -73,6 +74,7 @@ class AuditEventORM(Base):
             "payload": self.payload,
             "payload_hash": self.payload_hash,
             "pii_detected": self.pii_detected or [],
+            "security": self.security,
             "timestamp_ns": self.timestamp_ns,
             "sequence_number": self.sequence_number,
             "previous_hash": self.previous_hash,

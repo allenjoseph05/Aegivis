@@ -1,0 +1,188 @@
+/**
+ * Styles for the ExportPanel component.
+ */
+
+.panel {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 24px;
+}
+
+.panelTitle {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1e293b;
+  margin: 0 0 4px;
+}
+
+.panelDesc {
+  font-size: 13px;
+  color: #64748b;
+  margin-bottom: 20px;
+}
+
+.fieldset {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.fieldFull {
+  grid-column: 1 / -1;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #475569;
+}
+
+.required {
+  color: #ef4444;
+  margin-left: 2px;
+}
+
+.input {
+  padding: 7px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #1e293b;
+  background: #fff;
+}
+
+.input:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+}
+
+.input::placeholder {
+  color: #94a3b8;
+}
+
+.actions {
+  margin-top: 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.submitBtn {
+  padding: 8px 20px;
+  background: #4f46e5;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.submitBtn:hover:not(:disabled) {
+  background: #4338ca;
+}
+
+.submitBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.clearBtn {
+  background: none;
+  border: none;
+  font-size: 13px;
+  color: #64748b;
+  cursor: pointer;
+}
+
+.clearBtn:hover {
+  color: #1e293b;
+}
+
+.resultBox {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.resultSuccess {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #166534;
+}
+
+.resultError {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+}
+
+.resultTitle {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.resultRow {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.resultStat {
+  font-size: 12px;
+}
+
+.errorList {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  font-size: 12px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.errorList li {
+  padding: 3px 0;
+  border-top: 1px solid #fecaca;
+}
+
+.filterSection {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #f1f5f9;
+}
+
+.filterTitle {
+  font-size: 12px;
+  font-weight: 500;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 12px;
+}
+
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255,255,255,0.4);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

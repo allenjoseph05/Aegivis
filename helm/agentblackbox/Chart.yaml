@@ -1,0 +1,16 @@
+apiVersion: v2
+name: agentblackbox
+description: AgentBlackBox — AI Agent Security and Observability Platform
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - ai
+  - security
+  - observability
+  - llm
+  - agent
+  - audit
+home: https://github.com/agentblackbox/agentblackbox
+maintainers:
+  - name: AgentBlackBox Team

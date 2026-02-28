@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agentblackbox.fullname" . }}-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentblackbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  replicas: {{ .Values.backend.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "agentblackbox.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        {{- include "agentblackbox.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: backend
+    spec:
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.secretName }}
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.secretName }}
+                  key: POSTGRES_PASSWORD
+            - name: ABB_DATABASE_URL
+              value: "postgresql+asyncpg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ include "agentblackbox.fullname" . }}-postgres:5432/agentblackbox"
+            - name: ABB_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.secretName }}
+                  key: ABB_API_KEYS
+            - name: ABB_CORS_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "agentblackbox.fullname" . }}-config
+                  key: ABB_CORS_ORIGINS
+            - name: ABB_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "agentblackbox.fullname" . }}-config
+                  key: ABB_LOG_LEVEL
+            - name: ABB_DEBUG
+              value: {{ .Values.backend.env.ABB_DEBUG | quote }}
+            - name: ABB_METRICS_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "agentblackbox.fullname" . }}-config
+                  key: ABB_METRICS_ENABLED
+            - name: ABB_OTEL_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "agentblackbox.fullname" . }}-config
+                  key: ABB_OTEL_ENABLED
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 8
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3

@@ -1,12 +1,12 @@
 """GET /v1/sessions/{id}/replay — Forensic replay report."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db.connection import get_session
 from ...db.queries import get_session_events, get_session_summary
-from ...middleware.auth import require_api_key
+from ...middleware.auth import OrgContext, require_api_key
 from ...services.anomaly import detect_anomalies
 from ...services.forensic_replay import build_forensic_report
 from ...services.hash_verifier import verify_session_chain
@@ -17,24 +17,17 @@ router = APIRouter()
 @router.get("/sessions/{session_id}/replay", summary="Get forensic replay report")
 async def get_forensic_replay(
     session_id: str,
-    org_id: str = Query(default="default-org"),
     db: AsyncSession = Depends(get_session),
-    _api_key: str = Depends(require_api_key),
+    org_ctx: OrgContext = Depends(require_api_key),
 ):
     """
-    Generate a forensic replay report for a session.
-
-    Returns a structured incident report including:
-    - Chronological event timeline
-    - Data access map (tools called)
-    - Risk flags (anomalies, PII, chain violations)
-    - Hash chain integrity status
+    Generate a forensic replay report for a session, scoped to the authenticated org.
     """
-    summary = await get_session_summary(db, session_id=session_id, org_id=org_id)
+    summary = await get_session_summary(db, session_id=session_id, org_id=org_ctx.org_id)
     if not summary:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
 
-    events = await get_session_events(db, session_id=session_id, org_id=org_id, limit=50000)
+    events = await get_session_events(db, session_id=session_id, org_id=org_ctx.org_id, limit=50000)
 
     # Verify chain
     chain_result = verify_session_chain(session_id, events)

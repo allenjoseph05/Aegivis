@@ -9,7 +9,9 @@ export type EventType =
   | "TOOL_CALL_END"
   | "AGENT_FINISH"
   | "SYSTEM_ERROR"
-  | "CHECKPOINT";
+  | "CHECKPOINT"
+  | "MEMORY_WRITE_SCANNED"
+  | "MEMORY_WRITE_BLOCKED";
 
 export type InterceptionLayer = "proxy" | "otel" | "sdk" | "ebpf";
 
@@ -160,4 +162,48 @@ export interface Anomaly {
   sequence_number?: number | null;
   metadata: Record<string, unknown>;
   detected_at: string;
+}
+
+export interface AgentMetrics {
+  agent_id: string;
+  session_count: number;
+  llm_call_count: number;
+  tool_call_count: number;
+  error_count: number;
+  total_tokens: number;
+  avg_latency_ms: number | null;
+  pii_event_count: number;
+  injection_score_max: number;
+  anomaly_count: number;
+  first_seen: string | null;
+  last_seen: string | null;
+}
+
+export interface ModelMetrics {
+  model: string;
+  provider: string;
+  session_count: number;
+  call_count: number;
+  error_count: number;
+  total_tokens: number;
+  avg_latency_ms: number | null;
+  first_used: string | null;
+  last_used: string | null;
+}
+
+export interface MetricsOverview {
+  session_count: number;
+  agent_count: number;
+  llm_call_count: number;
+  tool_call_count: number;
+  error_count: number;
+  total_tokens: number;
+  pii_event_count: number;
+  memory_blocked_count: number;
+  avg_latency_ms: number | null;
+  total_anomalies: number;
+  high_severity_anomalies: number;
+  total_violations: number;
+  blocked_count: number;
+  alert_count: number;
 }

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
 from ...db.connection import get_session
-from ...middleware.auth import require_api_key
+from ...middleware.auth import OrgContext, require_api_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -29,7 +29,7 @@ async def list_anomalies(
     limit: int = Query(100, le=500),
     offset: int = Query(0),
     db: AsyncSession = Depends(get_session),
-    _api_key: str = Depends(require_api_key),
+    org_ctx: OrgContext = Depends(require_api_key),
 ):
     """
     List anomalies detected by the anomaly engine.
@@ -37,8 +37,8 @@ async def list_anomalies(
     Filter by session_id, agent_id, severity (critical/high/medium/low), or rule_id.
     Results are ordered by detection time descending (newest first).
     """
-    filters = []
-    params: dict = {"limit": limit, "offset": offset}
+    filters = ["org_id = :org_id"]
+    params: dict = {"limit": limit, "offset": offset, "org_id": org_ctx.org_id}
 
     if session_id:
         filters.append("session_id = :session_id")
@@ -53,7 +53,7 @@ async def list_anomalies(
         filters.append("rule_id = :rule_id")
         params["rule_id"] = rule_id
 
-    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    where = f"WHERE {' AND '.join(filters)}"
     sql = text(f"""
         SELECT id, session_id, agent_id, org_id, rule_id, severity,
                description, event_id, sequence_number, metadata, detected_at

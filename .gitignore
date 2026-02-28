@@ -87,6 +87,12 @@ docker-compose.local.yml
 postgres_data/
 
 # -----------------------------------------------------------------------------
+# Runtime data files (generated at runtime, should not be committed)
+# -----------------------------------------------------------------------------
+proxy/abb_sessions.json
+proxy/tests/external_dataset_results.json
+
+# -----------------------------------------------------------------------------
 # OS artifacts
 # -----------------------------------------------------------------------------
 .DS_Store

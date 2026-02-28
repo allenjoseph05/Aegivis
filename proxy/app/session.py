@@ -70,9 +70,31 @@ class SessionState:
         "started_at_ns",
         "last_seen_ns",
         "first_user_hash",
+        "active_canaries",          # dict[run_id -> canary_token]: cleared after each response
+        "event_type_sequence",      # list[str]: event types for Markov model (not persisted)
+        "max_injection_score",      # float: max injection score seen this session (persisted)
+        "injection_score_history",  # list[float]: rolling per-turn injection scores (not persisted)
+        "ml_injection_flag",        # bool: async ML classifier detected injection in previous turn (not persisted)
+        "ml_injection_score",       # float: ML classifier score that set the flag (not persisted)
+        "total_tokens",             # int: cumulative token usage this session (persisted)
+        "error_count",              # int: count of SYSTEM_ERROR events, used by Isolation Forest
+        # ── System prompt integrity (Phase 6) ─────────────────────────────────
+        "system_prompt_hash",       # str | None: SHA-256[:16] of first system prompt seen (persisted)
+        # ── Multi-agent spawn chain (Phase 6) ──────────────────────────────────
+        "parent_agent_id",          # str | None: agent_id of spawning agent (persisted)
+        "parent_session_id",        # str | None: session_id of spawning agent (persisted)
+        "spawn_depth",              # int: 0 = root agent, N = Nth level of delegation (persisted)
     )
 
-    def __init__(self, session_id: str, agent_id: str, first_user_hash: str | None = None):
+    def __init__(
+        self,
+        session_id: str,
+        agent_id: str,
+        first_user_hash: str | None = None,
+        parent_agent_id: str | None = None,
+        parent_session_id: str | None = None,
+        spawn_depth: int = 0,
+    ):
         self.session_id = session_id
         self.agent_id = agent_id
         self.sequence_number = 0
@@ -83,19 +105,38 @@ class SessionState:
         self.started_at_ns = time.time_ns()
         self.last_seen_ns = self.started_at_ns
         self.first_user_hash = first_user_hash
+        self.active_canaries: dict[str, str] = {}   # run_id -> canary token; not persisted
+        self.event_type_sequence: list[str] = []    # Markov model; not persisted
+        self.max_injection_score: float = 0.0       # persisted; updated on each scan
+        self.injection_score_history: list[float] = []  # rolling per-turn scores; not persisted
+        self.ml_injection_flag: bool = False         # Phase 4; async ML classifier; not persisted
+        self.ml_injection_score: float = 0.0        # Phase 4; score that set the flag; not persisted
+        self.total_tokens: int = 0                  # persisted; cumulative token usage
+        self.error_count: int = 0                   # persisted; SYSTEM_ERROR count for IF features
+        self.system_prompt_hash: str | None = None  # Phase 6; first system prompt hash; persisted
+        self.parent_agent_id: str | None = parent_agent_id   # Phase 6; spawn chain
+        self.parent_session_id: str | None = parent_session_id
+        self.spawn_depth: int = spawn_depth
 
     def to_dict(self) -> dict:
         return {
-            "session_id":        self.session_id,
-            "agent_id":          self.agent_id,
-            "sequence_number":   self.sequence_number,
-            "last_hash":         self.last_hash,
-            "llm_call_count":    self.llm_call_count,
-            "tool_call_count":   self.tool_call_count,
+            "session_id":         self.session_id,
+            "agent_id":           self.agent_id,
+            "sequence_number":    self.sequence_number,
+            "last_hash":          self.last_hash,
+            "llm_call_count":     self.llm_call_count,
+            "tool_call_count":    self.tool_call_count,
             "pending_tool_calls": self.pending_tool_calls,
-            "started_at_ns":     self.started_at_ns,
-            "last_seen_ns":      self.last_seen_ns,
-            "first_user_hash":   self.first_user_hash,
+            "started_at_ns":      self.started_at_ns,
+            "last_seen_ns":       self.last_seen_ns,
+            "first_user_hash":    self.first_user_hash,
+            "max_injection_score": self.max_injection_score,
+            "total_tokens":        self.total_tokens,
+            "error_count":         self.error_count,
+            "system_prompt_hash":  self.system_prompt_hash,
+            "parent_agent_id":     self.parent_agent_id,
+            "parent_session_id":   self.parent_session_id,
+            "spawn_depth":         self.spawn_depth,
         }
 
     @classmethod
@@ -111,6 +152,18 @@ class SessionState:
         obj.started_at_ns     = data.get("started_at_ns", time.time_ns())
         obj.last_seen_ns      = data.get("last_seen_ns", time.time_ns())
         obj.first_user_hash   = data.get("first_user_hash")
+        obj.active_canaries         = {}     # not persisted; cleared per response
+        obj.event_type_sequence     = []     # not persisted; Markov model resets on restart
+        obj.max_injection_score     = data.get("max_injection_score", 0.0)
+        obj.injection_score_history = []     # not persisted; rolling per-turn scores
+        obj.ml_injection_flag       = False  # not persisted; Phase 4 ML classifier flag
+        obj.ml_injection_score      = 0.0   # not persisted; Phase 4 ML classifier score
+        obj.total_tokens            = data.get("total_tokens", 0)
+        obj.error_count             = data.get("error_count", 0)
+        obj.system_prompt_hash      = data.get("system_prompt_hash")
+        obj.parent_agent_id         = data.get("parent_agent_id")
+        obj.parent_session_id       = data.get("parent_session_id")
+        obj.spawn_depth             = data.get("spawn_depth", 0)
         return obj
 
 
@@ -201,6 +254,8 @@ class SessionTracker:
         explicit_session_id: str | None,
         messages: list[dict],
         agent_id: str,
+        parent_agent_id: str | None = None,
+        parent_session_id: str | None = None,
     ) -> str:
         """
         Determine the session_id for this LLM call.
@@ -209,7 +264,11 @@ class SessionTracker:
         # Priority 1: explicit header
         if explicit_session_id:
             if explicit_session_id not in self._sessions:
-                self._create_session(explicit_session_id, agent_id, None)
+                self._create_session(
+                    explicit_session_id, agent_id, None,
+                    parent_agent_id=parent_agent_id,
+                    parent_session_id=parent_session_id,
+                )
             self._sessions[explicit_session_id].last_seen_ns = time.time_ns()
             return explicit_session_id
 
@@ -226,15 +285,45 @@ class SessionTracker:
 
         # New session
         session_id = _make_session_id()
-        self._create_session(session_id, agent_id, fuh)
+        self._create_session(
+            session_id, agent_id, fuh,
+            parent_agent_id=parent_agent_id,
+            parent_session_id=parent_session_id,
+        )
         if fuh:
             self._first_user_hash_index[fuh] = session_id
         return session_id
 
-    def _create_session(self, session_id: str, agent_id: str, fuh: str | None):
-        state = SessionState(session_id, agent_id, fuh)
+    def _create_session(
+        self,
+        session_id: str,
+        agent_id: str,
+        fuh: str | None,
+        *,
+        parent_agent_id: str | None = None,
+        parent_session_id: str | None = None,
+    ):
+        # Compute spawn depth: parent's depth + 1, or 1 if parent declared but unknown
+        spawn_depth = 0
+        if parent_session_id and parent_session_id in self._sessions:
+            spawn_depth = self._sessions[parent_session_id].spawn_depth + 1
+        elif parent_agent_id:
+            spawn_depth = 1  # parent declared but not tracked here yet
+
+        state = SessionState(
+            session_id, agent_id, fuh,
+            parent_agent_id=parent_agent_id,
+            parent_session_id=parent_session_id,
+            spawn_depth=spawn_depth,
+        )
         self._sessions[session_id] = state
-        logger.debug(f"New session: {session_id} (agent={agent_id})")
+        if parent_agent_id:
+            logger.debug(
+                f"New session: {session_id} (agent={agent_id}, "
+                f"parent={parent_agent_id}, depth={spawn_depth})"
+            )
+        else:
+            logger.debug(f"New session: {session_id} (agent={agent_id})")
 
     def get_state(self, session_id: str) -> "SessionState":
         """Return the live SessionState object (mutations persist)."""
@@ -265,8 +354,29 @@ _tracker: SessionTracker | None = None
 
 
 def get_session_tracker() -> SessionTracker:
+    """Return in-memory SessionTracker (default / fallback)."""
     global _tracker
     if _tracker is None:
         from .config import settings
         _tracker = SessionTracker(state_path=settings.session_state_path)
     return _tracker
+
+
+async def get_tracker() -> "SessionTracker":
+    """
+    Return the best available tracker.
+
+    If ABB_REDIS_URL is set:  RedisSessionTracker (state shared across proxies).
+    Otherwise:                 in-memory SessionTracker (default).
+    """
+    from .config import settings
+    if settings.redis_url:
+        try:
+            from .redis_session import get_redis_session_tracker
+            return await get_redis_session_tracker()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Redis session tracker unavailable (%s) — using in-memory", e
+            )
+    return get_session_tracker()

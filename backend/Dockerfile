@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -11,7 +12,9 @@ COPY pyproject.toml alembic.ini ./
 COPY app/ app/
 COPY migrations/ migrations/
 
-RUN pip install --no-cache-dir .
+# pip cache mounted for fast rebuilds
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install .
 
 EXPOSE 8000
 

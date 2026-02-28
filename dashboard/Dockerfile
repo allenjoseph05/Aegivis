@@ -1,8 +1,12 @@
+# syntax=docker/dockerfile:1
 FROM node:20-alpine AS builder
 
 WORKDIR /app
-COPY package.json ./
-RUN npm install
+
+# Copy lock file first so npm install layer is cached unless deps change
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --prefer-offline
 
 COPY . .
 RUN npm run build

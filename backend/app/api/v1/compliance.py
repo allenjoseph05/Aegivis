@@ -1,13 +1,13 @@
 """POST /v1/reports/generate — Generate compliance reports."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db.connection import get_session
 from ...db.queries import get_session_events, get_session_summary
-from ...middleware.auth import require_api_key
+from ...middleware.auth import OrgContext, require_api_key
 from ...services.compliance import REPORT_GENERATORS, generate_report
 from ...services.hash_verifier import verify_session_chain
 
@@ -18,7 +18,6 @@ VALID_REGULATIONS = list(REPORT_GENERATORS.keys())
 
 class GenerateReportRequest(BaseModel):
     session_id: str
-    org_id: str = "default-org"
     regulation: str  # "eu_ai_act" | "gdpr" | "hipaa" | "soc2"
 
 
@@ -26,7 +25,7 @@ class GenerateReportRequest(BaseModel):
 async def generate_compliance_report(
     req: GenerateReportRequest,
     db: AsyncSession = Depends(get_session),
-    _api_key: str = Depends(require_api_key),
+    org_ctx: OrgContext = Depends(require_api_key),
 ):
     """
     Generate a structured compliance report for a session.
@@ -43,17 +42,17 @@ async def generate_compliance_report(
             detail=f"Unknown regulation '{req.regulation}'. Valid: {VALID_REGULATIONS}",
         )
 
-    summary = await get_session_summary(db, session_id=req.session_id, org_id=req.org_id)
+    summary = await get_session_summary(db, session_id=req.session_id, org_id=org_ctx.org_id)
     if not summary:
         raise HTTPException(status_code=404, detail=f"Session '{req.session_id}' not found")
 
-    events = await get_session_events(db, session_id=req.session_id, org_id=req.org_id, limit=50000)
+    events = await get_session_events(db, session_id=req.session_id, org_id=org_ctx.org_id, limit=50000)
     chain_result = verify_session_chain(req.session_id, events)
 
     report = generate_report(
         regulation=req.regulation,
         session_id=req.session_id,
-        org_id=req.org_id,
+        org_id=org_ctx.org_id,
         events=events,
         chain_valid=chain_result.valid,
     )

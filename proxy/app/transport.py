@@ -278,7 +278,26 @@ _transport: EventTransport | None = None
 
 
 def get_transport() -> EventTransport:
+    """Return the in-memory/HTTP EventTransport (default / fallback)."""
     global _transport
     if _transport is None:
         _transport = EventTransport()
     return _transport
+
+
+async def get_best_transport() -> "EventTransport":
+    """
+    Return the best available transport.
+
+    If ABB_REDIS_URL is set:  RedisTransport (publishes to Redis Streams).
+    Otherwise:                 EventTransport (HTTP batches to backend).
+    """
+    if settings.redis_url:
+        try:
+            from .redis_transport import get_redis_transport
+            rt = await get_redis_transport()
+            if rt is not None:
+                return rt  # type: ignore[return-value]
+        except Exception as e:
+            logger.warning("RedisTransport unavailable (%s) — using HTTP transport", e)
+    return get_transport()
