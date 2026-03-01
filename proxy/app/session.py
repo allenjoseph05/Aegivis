@@ -84,6 +84,13 @@ class SessionState:
         "parent_agent_id",          # str | None: agent_id of spawning agent (persisted)
         "parent_session_id",        # str | None: session_id of spawning agent (persisted)
         "spawn_depth",              # int: 0 = root agent, N = Nth level of delegation (persisted)
+        # ── Data flow taint tracking (Phase 8) ─────────────────────────────────
+        "taint_tracker",            # TaintTracker | None: per-session credential taint store (not persisted)
+        # ── Trust propagation (Phase 9C) ───────────────────────────────────────
+        "trust_score",              # float: 0.0–1.0 trust score; degraded by violations (not persisted — resets on restart)
+        # ── Tool baseline enforcement ───────────────────────────────────────────
+        "tools_hash",               # str | None: SHA-256[:16] of tools[] from first call; not persisted
+        "tools_set",                # frozenset[str] | None: tool names from first call; not persisted
     )
 
     def __init__(
@@ -91,6 +98,7 @@ class SessionState:
         session_id: str,
         agent_id: str,
         first_user_hash: str | None = None,
+        *,
         parent_agent_id: str | None = None,
         parent_session_id: str | None = None,
         spawn_depth: int = 0,
@@ -117,6 +125,10 @@ class SessionState:
         self.parent_agent_id: str | None = parent_agent_id   # Phase 6; spawn chain
         self.parent_session_id: str | None = parent_session_id
         self.spawn_depth: int = spawn_depth
+        self.taint_tracker = None                            # Phase 8; lazy-init TaintTracker; not persisted
+        self.trust_score: float = 1.0                       # Phase 9C; starts fully trusted; not persisted
+        self.tools_hash: str | None = None                  # tool baseline; hash of tools[] from first call
+        self.tools_set: frozenset[str] | None = None        # tool baseline; names from first call
 
     def to_dict(self) -> dict:
         return {
@@ -164,7 +176,18 @@ class SessionState:
         obj.parent_agent_id         = data.get("parent_agent_id")
         obj.parent_session_id       = data.get("parent_session_id")
         obj.spawn_depth             = data.get("spawn_depth", 0)
+        obj.taint_tracker           = None   # not persisted; recreated lazily
+        obj.trust_score             = 1.0   # not persisted; resets on proxy restart
+        obj.tools_hash              = None  # not persisted
+        obj.tools_set               = None  # not persisted
         return obj
+
+    def get_taint_tracker(self) -> "TaintTracker":
+        """Return the session's TaintTracker, creating it on first access."""
+        if self.taint_tracker is None:
+            from .security.taint_tracker import TaintTracker
+            self.taint_tracker = TaintTracker()
+        return self.taint_tracker
 
 
 class SessionTracker:
@@ -316,6 +339,19 @@ class SessionTracker:
             parent_session_id=parent_session_id,
             spawn_depth=spawn_depth,
         )
+        # Register with trust graph (Phase 9C) — inherit parent trust score
+        try:
+            from .trust.graph import get_trust_graph
+            entry = get_trust_graph().register(
+                session_id=session_id,
+                agent_id=agent_id,
+                parent_session_id=parent_session_id,
+                parent_agent_id=parent_agent_id,
+            )
+            state.trust_score = entry.trust_score
+        except Exception:
+            pass  # trust graph is best-effort
+
         self._sessions[session_id] = state
         if parent_agent_id:
             logger.debug(

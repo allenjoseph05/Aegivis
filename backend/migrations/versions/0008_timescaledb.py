@@ -22,13 +22,28 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Create the extension if it isn't already present.
-    # Silently skips on plain PostgreSQL (extension not available).
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Check if the timescaledb extension is available on this PostgreSQL install.
+    # On plain postgres:16-alpine it is not; on timescale/timescaledb:latest-pg16 it is.
+    conn = op.get_bind()
+    row = conn.execute(
+        __import__("sqlalchemy").text(
+            "SELECT COUNT(*) FROM pg_available_extensions WHERE name = 'timescaledb'"
+        )
+    ).scalar()
+
+    if not row:
+        logger.warning(
+            "TimescaleDB extension not available on this PostgreSQL install — "
+            "skipping hypertable conversion. Switch to timescale/timescaledb:latest-pg16 "
+            "in docker-compose.yml to enable time-series optimisations."
+        )
+        return
+
     op.execute("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE")
 
-    # Convert audit_events to a hypertable.
-    # migrate_data=true handles existing rows.
-    # if_not_exists=true is idempotent on re-runs.
     op.execute("""
         SELECT create_hypertable(
             'audit_events', 'received_at',
@@ -38,7 +53,6 @@ def upgrade() -> None:
         )
     """)
 
-    # Enable native compression (columnar storage for cold chunks).
     op.execute("""
         ALTER TABLE audit_events SET (
             timescaledb.compress,
@@ -47,7 +61,6 @@ def upgrade() -> None:
         )
     """)
 
-    # Automatically compress chunks older than 7 days.
     op.execute("""
         SELECT add_compression_policy(
             'audit_events', INTERVAL '7 days',

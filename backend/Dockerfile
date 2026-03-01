@@ -14,7 +14,7 @@ COPY migrations/ migrations/
 
 # pip cache mounted for fast rebuilds
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install .
+    pip install ".[redis]"
 
 EXPOSE 8000
 

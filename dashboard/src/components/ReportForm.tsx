@@ -43,7 +43,7 @@ export function ReportForm({ sessionId, orgId = "default-org" }: ReportFormProps
     setError(null);
     setReport(null);
     try {
-      const result = await generateComplianceReport(sessionId, selected, orgId);
+      const result = await generateComplianceReport(sessionId, selected);
       setReport(result);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to generate report");

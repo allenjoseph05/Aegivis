@@ -37,6 +37,18 @@ class BackendSettings(BaseSettings):
     # Slack webhook alerts (optional — leave empty to disable)
     slack_webhook_url: str = ""
 
+    # PagerDuty Events API v2 (optional — leave empty to disable)
+    pagerduty_routing_key: str = ""
+
+    # Generic webhook alert channel (optional — leave empty to disable)
+    alert_webhook_url: str = ""
+    alert_webhook_secret: str = ""  # HMAC-SHA256 signing secret
+
+    # Anti-fatigue: suppress duplicate alerts within this window (seconds)
+    alert_cooldown_s: int = 600
+    # Minimum severity to send external alerts ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+    alert_min_severity: str = "MEDIUM"
+
     # SIEM export — Splunk HEC (optional defaults; overridden per-request)
     splunk_hec_url:   str = ""
     splunk_hec_token: str = ""
@@ -58,6 +70,13 @@ class BackendSettings(BaseSettings):
     otel_enabled: bool = False
     otel_endpoint: str = "http://localhost:4317"
     otel_service_name: str = "agentblackbox-backend"
+
+    # -------------------------------------------------------------------------
+    # Rate limiting — sliding-window counter keyed by API key or client IP
+    # -------------------------------------------------------------------------
+    rate_limit_enabled: bool = True
+    rate_limit_per_minute: int = 300          # read/general endpoints (GET /v1/*)
+    rate_limit_ingest_per_minute: int = 3000  # ingest endpoints (POST /v1/events, violations)
 
     # -------------------------------------------------------------------------
     # Redis (optional) — Redis Streams event pipeline + distributed state

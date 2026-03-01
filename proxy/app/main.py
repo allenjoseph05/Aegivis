@@ -240,10 +240,13 @@ async def _proxy_and_capture(
         request_params = provider_cls.extract_request_params(body)
         model = request_params.get("model", model)
 
-    # Build interception context
+    # Build interception context — use Redis transport if available, else HTTP
+    from .transport import get_best_transport as _get_best_transport
+    _transport = await _get_best_transport()
     context = InterceptContext(
         session_tracker=get_session_tracker(),
         org_id=abb["org_id"],
+        transport=_transport,
     )
 
     # Process request (emit LLM_CALL_START + any pending TOOL_CALL_END)
@@ -369,7 +372,7 @@ async def _handle_non_streaming(
     else:
         parsed_resp = provider_cls.parse_response(resp_body)
 
-    await context.process_response(
+    resp_violations = await context.process_response(
         session_id=session_id,
         run_id=run_id,
         provider=provider_name,
@@ -379,6 +382,26 @@ async def _handle_non_streaming(
         latency_ms=latency_ms,
         http_status=resp.status_code,
     )
+
+    # Check for BLOCK violations raised during TOOL_CALL_START processing
+    # (e.g. taint-tracking data-exfiltration-attempt). Return 403 so the agent
+    # never receives the tool_calls and cannot execute the exfiltrating tool.
+    resp_blocks = [v for v in resp_violations if v.action == PolicyAction.BLOCK]
+    if resp_blocks:
+        rv = resp_blocks[0]
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "policy_violation",
+                "rule": rv.rule_name,
+                "reason": rv.reason,
+                "session_id": session_id,
+            },
+            headers={
+                "X-ABB-Policy-Rule": rv.rule_name,
+                "X-ABB-Session-ID": session_id,
+            },
+        )
 
     return Response(
         content=resp.content,

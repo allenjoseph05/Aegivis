@@ -15,6 +15,7 @@ import { ExportPage } from "./pages/Export";
 import { BenchmarkPage } from "./pages/Benchmark";
 import { PolicyBuilderPage } from "./pages/PolicyBuilder";
 import { AgentsPage } from "./pages/Agents";
+import { BaselinesPage } from "./pages/Baselines";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -121,6 +122,18 @@ function Layout({ children }: { children: React.ReactNode }) {
             Agents
           </NavLink>
           <NavLink
+            to="/baselines"
+            className={({ isActive }) =>
+              `px-3 py-1.5 rounded text-sm transition-colors ${
+                isActive
+                  ? "bg-white/10 text-white"
+                  : "text-gray-400 hover:text-white hover:bg-white/5"
+              }`
+            }
+          >
+            Baselines
+          </NavLink>
+          <NavLink
             to="/benchmark"
             className={({ isActive }) =>
               `px-3 py-1.5 rounded text-sm transition-colors ${
@@ -158,6 +171,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             <Route path="/export" element={<ExportPage />} />
             <Route path="/policy" element={<PolicyBuilderPage />} />
             <Route path="/agents" element={<AgentsPage />} />
+            <Route path="/baselines" element={<BaselinesPage />} />
             <Route path="/benchmark" element={<BenchmarkPage />} />
           </Routes>
         </Layout>

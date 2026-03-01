@@ -48,9 +48,13 @@ def proxy_app(mock_transport):
     Start the proxy app once per module with a mocked transport.
     Yields (TestClient, mock_transport).
     """
+    async def _mock_get_best(*, force_http=False):  # noqa: ARG001
+        return mock_transport
+
     with (
         patch("proxy.app.main.get_transport", return_value=mock_transport),
         patch("proxy.app.intercept.get_transport", return_value=mock_transport),
+        patch("proxy.app.transport.get_best_transport", side_effect=_mock_get_best),
     ):
         with TestClient(
             __import__("proxy.app.main", fromlist=["app"]).app,

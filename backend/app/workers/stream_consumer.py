@@ -180,6 +180,17 @@ async def run_violation_consumer(
                         )
                         continue
 
+                    # Dispatch external alerts (fire-and-forget, never blocks ACK)
+                    try:
+                        from ..services.notifications import dispatch_violation_alert
+                        for v in violations:
+                            asyncio.create_task(
+                                dispatch_violation_alert(v),
+                                name=f"alert-{v.get('rule_name','?')}",
+                            )
+                    except Exception as e:
+                        logger.warning("Alert dispatch setup failed (non-critical): %s", e)
+
                 await redis_client.xack(_STREAM_VIOLATIONS, _GROUP, *msg_ids)
 
         except asyncio.CancelledError:

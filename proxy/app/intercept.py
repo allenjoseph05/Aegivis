@@ -40,7 +40,7 @@ from .reconstruct import (
 from .policy import PolicyAction, PolicyViolation, get_policy_engine
 from .session import SessionState, SessionTracker
 from .tool_permissions import get_tool_permissions_engine
-from .transport import get_transport
+from .transport import get_transport, EventTransport
 
 logger = logging.getLogger(__name__)
 
@@ -88,10 +88,11 @@ class InterceptContext:
         *,
         session_tracker: SessionTracker,
         org_id: str,
+        transport: EventTransport | None = None,
     ):
         self.session_tracker = session_tracker
         self.org_id = org_id
-        self.transport = get_transport()
+        self.transport = transport if transport is not None else get_transport()
         self.policy_engine = get_policy_engine()
 
     def _sign_event(self, event: dict, previous_hash: str) -> dict:
@@ -129,7 +130,7 @@ class InterceptContext:
                     f"session={v.session_id} agent={v.agent_id} "
                     f"event={v.event_type} reason={v.reason!r}"
                 )
-            if v.action == PolicyAction.ALERT and settings.violations_enabled:
+            if v.action in (PolicyAction.ALERT, PolicyAction.BLOCK) and settings.violations_enabled:
                 self.transport.enqueue_violation(v.to_dict())
         return violations
 
@@ -359,6 +360,16 @@ class InterceptContext:
                     except Exception as exc:
                         logger.warning("Tool output scan error (continuing): %s", exc)
 
+                # Hook 2: Taint credentials returned by this tool result
+                if settings.security_taint_tracking_enabled and tr.get("content"):
+                    try:
+                        from .security.taint_tracker import extract_credentials_from_text
+                        tool_source = f"tool_result:{pending.get('tool_name', 'unknown')}"
+                        for cred_val, cred_label in extract_credentials_from_text(str(tr["content"])):
+                            state.get_taint_tracker().taint(cred_val, cred_label, tool_source)
+                    except Exception as _te:
+                        logger.debug("Taint extraction from tool result failed (skipped): %s", _te)
+
                 seq += 1
                 prev_hash = tool_end["current_hash"]
                 self.transport.enqueue(tool_end)
@@ -411,6 +422,14 @@ class InterceptContext:
                     "[SYS-PROMPT] baseline stored hash=%s session=%s",
                     new_hash, session_id,
                 )
+                # Hook 1: Taint credentials found in system prompt
+                if settings.security_taint_tracking_enabled:
+                    try:
+                        from .security.taint_tracker import extract_credentials_from_text
+                        for cred_val, cred_label in extract_credentials_from_text(system_prompt):
+                            state.get_taint_tracker().taint(cred_val, cred_label, "system_prompt")
+                    except Exception as _te:
+                        logger.debug("Taint extraction from system prompt failed (skipped): %s", _te)
             elif state.system_prompt_hash != new_hash:
                 logger.warning(
                     "[SYS-PROMPT:BLOCK] mutation detected: %s→%s session=%s agent=%s",
@@ -441,6 +460,81 @@ class InterceptContext:
                 state.last_seen_ns = time.time_ns()
                 self.transport.enqueue(start_event)
                 return session_id, run_id, [spv], None
+
+        # --- Tool baseline: hash tools[] and detect mid-session mutations ----
+        # The LLM API guarantees the model can only call tools in the tools[]
+        # array sent by the client.  We fingerprint that array on the first
+        # call of a session and BLOCK if it changes on any subsequent call.
+        # This catches prompt-injection that convinces an orchestrator to
+        # add extra tools mid-flight, with zero risk on the first call.
+        if settings.tool_baseline_enabled and tools:
+            try:
+                from .security.tool_baseline import (
+                    extract_tool_names as _tb_names,
+                    hash_tool_set as _tb_hash,
+                    report_tools_observed as _tb_report,
+                )
+                _tool_names_now = _tb_names(tools)
+                _tool_hash_now  = _tb_hash(tools)
+
+                if state.tools_hash is None:
+                    # ── First call: establish session baseline ──────────────
+                    state.tools_hash = _tool_hash_now
+                    state.tools_set  = frozenset(_tool_names_now)
+                    logger.debug(
+                        "[TOOL-BASELINE] baseline set hash=%s tools=%s session=%s agent=%s",
+                        _tool_hash_now, sorted(_tool_names_now), session_id, agent_id,
+                    )
+                    # Report observed tools to backend (async, fire-and-forget)
+                    asyncio.create_task(
+                        _tb_report(
+                            agent_id, self.org_id, tools, session_id,
+                            settings.backend_url, settings.backend_api_key,
+                        ),
+                        name=f"tb-observe-{session_id[:8]}",
+                    )
+
+                elif _tool_hash_now != state.tools_hash:
+                    # ── Subsequent call: tool set changed → BLOCK ───────────
+                    _new_tools = _tool_names_now - (state.tools_set or set())
+                    _removed   = (state.tools_set or set()) - _tool_names_now
+                    logger.warning(
+                        "[TOOL-BASELINE:BLOCK] mid-session mutation "
+                        "added=%s removed=%s session=%s agent=%s",
+                        sorted(_new_tools), sorted(_removed), session_id, agent_id,
+                    )
+                    _tbm_v = PolicyViolation(
+                        rule_name="tool-set-mutation",
+                        action=PolicyAction.BLOCK,
+                        reason=(
+                            f"Tool set changed mid-session. "
+                            f"Added: {sorted(_new_tools) or 'none'}. "
+                            f"Removed: {sorted(_removed) or 'none'}."
+                        ),
+                        event_type="LLM_CALL_START",
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        org_id=self.org_id,
+                        timestamp_ns=time.time_ns(),
+                    )
+                    start_event.setdefault("security", {})["tool_baseline"] = {
+                        "mutation_detected": True,
+                        "new_tools": sorted(_new_tools),
+                        "removed_tools": sorted(_removed),
+                    }
+                    start_event["blocked"] = True
+                    seq += 1
+                    prev_hash = start_event["current_hash"]
+                    state.sequence_number = seq
+                    state.last_hash = prev_hash
+                    state.llm_call_count += 1
+                    state.last_seen_ns = time.time_ns()
+                    self.transport.enqueue(start_event)
+                    if settings.violations_enabled:
+                        self.transport.enqueue_violation(_tbm_v.to_dict())
+                    return session_id, run_id, [_tbm_v], None
+            except Exception as _tbe:
+                logger.debug("Tool baseline check error (skipped): %s", _tbe)
 
         # --- MCP tool definition scanning (Phase 3.3) ---
         # Scan tools[] array for malicious definitions: name traversal,
@@ -637,7 +731,19 @@ class InterceptContext:
         policy_violations = self._evaluate_policy(start_event, state)
         violations = violations + policy_violations
         block = [v for v in violations if v.action == PolicyAction.BLOCK]
+
+        # --- Trust graph: update on solid BLOCK violations (Phase 9C) ----------
+        # Only triggered by cryptographically solid signals (canary, taint, mutation).
+        _inj_score_now = start_event.get("security", {}).get("injection_score", 0.0)
         if block:
+            try:
+                from .trust.graph import get_trust_graph
+                new_trust = get_trust_graph().on_violation(
+                    session_id, block[0].rule_name, "BLOCK", _inj_score_now
+                )
+                state.trust_score = new_trust
+            except Exception:
+                pass
             # Store blocked event in audit trail so blocks are fully auditable
             start_event["blocked"] = True
             start_event["block_reason"] = block[0].rule_name
@@ -821,11 +927,17 @@ class InterceptContext:
         response_data: dict,
         latency_ms: float,
         http_status: int,
-    ) -> None:
+    ) -> list[PolicyViolation]:
         """
         Process a complete LLM API response (assembled from SSE chunks if streaming).
+
+        Returns a list of PolicyViolation objects raised during TOOL_CALL_START
+        processing (e.g. taint-tracking BLOCK violations). Callers should check
+        for BLOCK violations and return 403 before forwarding the response to the
+        agent (non-streaming only; streaming responses are already in flight).
         """
         state: SessionState = self.session_tracker.get_state(session_id)
+        _response_violations: list[PolicyViolation] = []
         seq = state.sequence_number
         prev_hash = state.last_hash
 
@@ -1013,6 +1125,95 @@ class InterceptContext:
                     )
             except Exception as exc:
                 logger.warning("Enforcement tool scan error (continuing): %s", exc)
+
+            # --- Hook 3: Data flow taint check (Phase 8) -------------------------
+            # Detect credential exfiltration: a tainted value (from system prompt
+            # or tool result) appearing verbatim in a tool call argument.
+            # Network-sink tools: BLOCK.  Other tools: ALERT.
+            if settings.security_taint_tracking_enabled and state.taint_tracker:
+                try:
+                    taint_hits = state.taint_tracker.check_tool_call(tc_name, tc_args if isinstance(tc_args, dict) else {})
+                    for hit in taint_hits:
+                        if hit.is_network_sink:
+                            tv = PolicyViolation(
+                                rule_name="data-exfiltration-attempt",
+                                action=PolicyAction.BLOCK,
+                                reason=(
+                                    f"Tainted credential ({hit.label} from {hit.source}) "
+                                    f"found in arg '{hit.arg_key}' of network-sink tool '{hit.tool_name}'"
+                                ),
+                                event_type="TOOL_CALL_START",
+                                session_id=session_id,
+                                agent_id=agent_id,
+                                org_id=self.org_id,
+                            )
+                            logger.warning(
+                                "[TAINT:BLOCK] data-exfiltration-attempt tool=%s arg=%s label=%s source=%s session=%s",
+                                hit.tool_name, hit.arg_key, hit.label, hit.source, session_id,
+                            )
+                            if settings.violations_enabled:
+                                self.transport.enqueue_violation(tv.to_dict())
+                            _response_violations.append(tv)
+                            continue  # Skip this tool call — violation recorded
+                        else:
+                            av = PolicyViolation(
+                                rule_name="data-flow-suspicious",
+                                action=PolicyAction.ALERT,
+                                reason=(
+                                    f"Tainted credential ({hit.label} from {hit.source}) "
+                                    f"found in arg '{hit.arg_key}' of tool '{hit.tool_name}'"
+                                ),
+                                event_type="TOOL_CALL_START",
+                                session_id=session_id,
+                                agent_id=agent_id,
+                                org_id=self.org_id,
+                            )
+                            logger.warning(
+                                "[TAINT:ALERT] data-flow-suspicious tool=%s arg=%s label=%s source=%s session=%s",
+                                hit.tool_name, hit.arg_key, hit.label, hit.source, session_id,
+                            )
+                            if settings.violations_enabled:
+                                self.transport.enqueue_violation(av.to_dict())
+                except Exception as _te:
+                    logger.debug("Taint check error (skipped): %s", _te)
+
+            # --- Tool baseline enforcement ----------------------------------------
+            # If the operator has approved a baseline for this agent, any tool
+            # name not in that approved set is blocked immediately.
+            # Agents with no approved baseline are in audit mode (not blocked).
+            if settings.tool_baseline_enabled:
+                try:
+                    from .security.tool_baseline import get_approved_baseline as _get_bl
+                    _approved = await _get_bl(
+                        agent_id, self.org_id,
+                        settings.backend_url, settings.backend_api_key,
+                        cache_ttl_s=settings.tool_baseline_cache_ttl_s,
+                    )
+                    if _approved is not None and tc_name not in _approved:
+                        logger.warning(
+                            "[TOOL-BASELINE:BLOCK] unapproved tool=%s agent=%s session=%s",
+                            tc_name, agent_id, session_id,
+                        )
+                        _bl_v = PolicyViolation(
+                            rule_name="tool-not-in-baseline",
+                            action=PolicyAction.BLOCK,
+                            reason=(
+                                f"Tool '{tc_name}' has not been approved for agent "
+                                f"'{agent_id}'. Review and approve it in the Baselines "
+                                f"dashboard to allow this tool."
+                            ),
+                            event_type="TOOL_CALL_START",
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            org_id=self.org_id,
+                            timestamp_ns=time.time_ns(),
+                        )
+                        if settings.violations_enabled:
+                            self.transport.enqueue_violation(_bl_v.to_dict())
+                        _response_violations.append(_bl_v)
+                        continue  # Skip this tool call
+                except Exception as _ble:
+                    logger.debug("Tool baseline enforcement error (skipped): %s", _ble)
 
             # --- Tool permissions check (Phase 3.1 Iteration 3) ---
             # Evaluated BEFORE policy engine and BEFORE tool_call_count increment
@@ -1205,3 +1406,4 @@ class InterceptContext:
         state.sequence_number = seq
         state.last_hash = prev_hash
         state.last_seen_ns = time.time_ns()
+        return _response_violations
