@@ -554,6 +554,18 @@ const SECURITY_RULES: Array<{
     layer: "Tool",
     description: "Server-side request forgery in tool arguments",
   },
+  {
+    rule: "data-exfiltration-attempt",
+    label: "Exfiltration",
+    layer: "Taint",
+    description: "Blocks tool calls that would send a tainted credential (from system prompt or tool result) to an external destination.",
+  },
+  {
+    rule: "data-flow-suspicious",
+    label: "Data Flow",
+    layer: "Taint",
+    description: "Alerts when a tainted credential appears in a tool call argument (non-network destination).",
+  },
 ];
 
 function MemoryGuardCard() {

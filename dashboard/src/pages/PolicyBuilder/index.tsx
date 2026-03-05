@@ -38,7 +38,7 @@ export function PolicyBuilderPage() {
 
   const toolsQ = useQuery({
     queryKey: ["observed-tools"],
-    queryFn: () => listObservedTools("default-org", 30),
+    queryFn: () => listObservedTools(30),
     staleTime: 30_000,
   });
 
@@ -46,7 +46,7 @@ export function PolicyBuilderPage() {
   const [suggestionsEnabled, setSuggestionsEnabled] = useState(false);
   const suggestionsQ = useQuery({
     queryKey: ["policy-suggestions"],
-    queryFn: () => getPolicySuggestions("default-org", 30),
+    queryFn: () => getPolicySuggestions(30),
     enabled: suggestionsEnabled,
     staleTime: 60_000,
   });

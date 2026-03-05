@@ -149,6 +149,20 @@ class ProxySettings(BaseSettings):
     security_mcp_scanning_enabled: bool = True
 
     # -------------------------------------------------------------------------
+    # Steganographic injection scanner (Phase 9E)
+    # -------------------------------------------------------------------------
+    # Detect invisible Unicode characters (tag chars U+E0000-E007F, zero-width
+    # chars, RTL direction overrides) used to hide injection payloads.
+    # Near-zero FPR: tag chars have no legitimate use; two-gate rule
+    # (invisible chars + injection in stripped text) keeps BLOCK FPR < 0.5%.
+    security_unicode_stego_enabled: bool = True
+
+    # Scan PDF and DOCX documents for hidden text layers, annotations, metadata
+    # injection, and macros. Requires: pip install 'agentblackbox-proxy[docs]'
+    # (pymupdf + python-docx). Gracefully disabled if deps not installed.
+    security_document_scan_enabled: bool = True
+
+    # -------------------------------------------------------------------------
     # Behavioral analytics (Phase 3.3)
     # -------------------------------------------------------------------------
     # Enable Markov sequence model + Isolation Forest anomaly detection.
@@ -233,6 +247,15 @@ class ProxySettings(BaseSettings):
     rate_limit_max_llm_calls_per_session: int = 0
 
     # -------------------------------------------------------------------------
+    # Data flow taint tracking (Phase 8)
+    # -------------------------------------------------------------------------
+    # Tags credentials the moment they enter agent context (system prompt or
+    # tool result). Blocks tool calls that would send a tainted credential to
+    # a network-sink tool (http_request, send_email, webhook, etc.).
+    # Near-zero false positive rate — exact credential substring match.
+    security_taint_tracking_enabled: bool = True
+
+    # -------------------------------------------------------------------------
     # Multi-agent spawn chain enforcement (Phase 6)
     # -------------------------------------------------------------------------
     # Maximum allowed agent delegation depth.  0 = disabled.
@@ -266,6 +289,24 @@ class ProxySettings(BaseSettings):
     # Empty = use in-memory session state + direct HTTP transport (default).
     # Example: "redis://redis:6379/0"
     redis_url: str = ""
+
+    # -------------------------------------------------------------------------
+    # Tool baseline enforcement
+    # -------------------------------------------------------------------------
+    # When enabled the proxy:
+    #   1. Hashes the tools[] array on the first call of each session and
+    #      blocks any mid-session change (tool-set-mutation violation).
+    #   2. Reports newly observed tools to the backend so operators can
+    #      review them in the Baselines dashboard.
+    #   3. At TOOL_CALL_START, blocks any tool whose name is not in the
+    #      operator-approved set for this agent (once a baseline exists).
+    #
+    # Agents with no approved baseline remain in *audit mode*: tools are
+    # observed and reported but never blocked on scope grounds.
+    tool_baseline_enabled: bool = True
+    # How long (seconds) to cache the approved tool list per agent before
+    # re-fetching from the backend.  5 minutes is a good default.
+    tool_baseline_cache_ttl_s: float = 300.0
 
     # Logging
     log_level: str = "INFO"

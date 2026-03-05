@@ -7,7 +7,7 @@ FROM python:3.11-slim
 # - classifier: Async ML injection classifier (transformers, torch ~280 MB on first run)
 # - ml:         Behavioral Isolation Forest (scikit-learn)
 # Strip for lightweight CI/dev: PROXY_BUILD_EXTRAS=pii,security docker compose build proxy
-ARG BUILD_EXTRAS=pii,security,classifier,ml
+ARG BUILD_EXTRAS=pii,security,classifier,ml,redis
 
 WORKDIR /app
 

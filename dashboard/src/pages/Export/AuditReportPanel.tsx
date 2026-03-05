@@ -304,7 +304,7 @@ export function AuditReportPanel() {
   const { data: report, isLoading, error } = useQuery({
     queryKey: ["auditReport", queryKey, orgId, fromDate, toDate, framework, agentId],
     queryFn: () =>
-      getAuditReport({ org_id: orgId, from_date: fromDate, to_date: toDate, framework, agent_id: agentId || undefined }),
+      getAuditReport({ from_date: fromDate, to_date: toDate, framework, agent_id: agentId || undefined }),
     enabled,
   });
 

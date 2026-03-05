@@ -226,11 +226,29 @@ def normalize(text: str) -> NormalizationResult:
     score = 0.0
 
     # ── Step 1: Strip invisible codepoints ──────────────────────────────────
+    # Also strip Phase 9E tag characters (U+E0000–U+E007F): these have zero
+    # legitimate use and can encode entire ASCII prompts invisibly.
+    _TAG_CHAR_START = 0xE0000
+    _TAG_CHAR_END   = 0xE007F
+
+    tag_count = sum(
+        1 for ch in text if _TAG_CHAR_START <= ord(ch) <= _TAG_CHAR_END
+    )
     invisible_count = sum(1 for ch in text if ch in _INVISIBLE_CODEPOINTS)
-    if invisible_count:
-        text = "".join(ch for ch in text if ch not in _INVISIBLE_CODEPOINTS)
-        # Even 1 invisible char is anomalous; scale up to 1.0 quickly
-        score = max(score, min(1.0, invisible_count * 0.15))
+
+    total_invisible = invisible_count + tag_count
+    if total_invisible:
+        text = "".join(
+            ch for ch in text
+            if ch not in _INVISIBLE_CODEPOINTS
+            and not (_TAG_CHAR_START <= ord(ch) <= _TAG_CHAR_END)
+        )
+        if tag_count > 0:
+            # Tag chars are HIGH severity — escalate score more aggressively
+            score = max(score, min(1.0, tag_count * 0.30))
+            encodings.append("unicode_tag_chars")
+        if invisible_count:
+            score = max(score, min(1.0, invisible_count * 0.15))
 
     # ── Step 2: HTML entity decoding ────────────────────────────────────────
     decoded_html = html.unescape(text)

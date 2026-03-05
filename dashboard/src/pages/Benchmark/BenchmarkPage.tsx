@@ -747,6 +747,28 @@ function ReportDisplay({
         />
       </div>
 
+      {/* Benchmark rigor cards (only shown for internal benchmark with rigor data) */}
+      {!isExternal && (report.contamination_pct !== undefined || report.paraphrase_tpr !== undefined) && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {report.contamination_pct !== undefined && (
+            <MetricCard
+              title="Self-Test Bias"
+              value={fmtPct(report.contamination_pct)}
+              subtitle={`${Math.round((report.contamination_pct ?? 0) * (report.total_attacks ?? 0))} of ${report.total_attacks} attack cases use exact scanner phrases`}
+              color={(report.contamination_pct ?? 0) > 0.8 ? "yellow" : "green"}
+            />
+          )}
+          {report.paraphrase_tpr !== undefined && (
+            <MetricCard
+              title="Paraphrase TPR"
+              value={fmtPct(report.paraphrase_tpr)}
+              subtitle={`${report.paraphrase_detected ?? 0} of ${report.paraphrase_count ?? 0} paraphrase attacks caught (no phrase overlap)`}
+              color={(report.paraphrase_tpr ?? 0) >= 0.5 ? "green" : (report.paraphrase_tpr ?? 0) >= 0.25 ? "yellow" : "red"}
+            />
+          )}
+        </div>
+      )}
+
       {/* Active layers (internal only — external uses same pipeline) */}
       {!isExternal && <ActiveLayersCard activeLayers={report.active_layers ?? []} />}
 

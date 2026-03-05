@@ -101,12 +101,18 @@ services:
       ABB_ANTHROPIC_UPSTREAM: https://api.anthropic.com
       ABB_GOOGLE_UPSTREAM: https://generativelanguage.googleapis.com
       ABB_OLLAMA_UPSTREAM: http://host.docker.internal:11434
-      ABB_ANALYSIS_CLASSIFIER_SYNC_ENABLED: "true"
+      # Async ML classifier: runs DeBERTa in a background task (non-blocking, ~50ms).
+      # Flags session for BLOCK at the NEXT LLM call. Zero hot-path latency cost.
       ABB_ANALYSIS_CLASSIFIER_ENABLED: "true"
+      # Sync ML: runs DeBERTa inline on EVERY LLM call, adding ~50ms latency.
+      ABB_ANALYSIS_CLASSIFIER_SYNC_ENABLED: "true"
+      # Second sync classifier: adds PromptGuard-86M ensemble (~20ms extra).
       ABB_ANALYSIS_CLASSIFIER_SECOND_ENABLED: "true"
+      # Tool output ML scan: scans tool results through DeBERTa (~50ms/result).
       ABB_SECURITY_TOOL_OUTPUT_ML_SCAN_ENABLED: "true"
       # Redis: enables distributed session state (multi-proxy) and stream pipeline
       ABB_REDIS_URL: "redis://redis:6379/0"
+      # Pass API keys from your .env file — never hardcode them here
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       HF_HOME: /hf_cache

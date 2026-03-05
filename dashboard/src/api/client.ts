@@ -409,6 +409,11 @@ export interface BenchmarkReport {
   active_layers: string[];
   layer_coverage: Record<string, number>;
   samples: CaseResult[];
+  // Benchmark rigor fields
+  contamination_pct?: number;
+  paraphrase_tpr?: number;
+  paraphrase_count?: number;
+  paraphrase_detected?: number;
 }
 
 export async function runBenchmark(): Promise<BenchmarkReport> {
@@ -629,5 +634,65 @@ export interface AuditReportParams {
 
 export async function getAuditReport(params: AuditReportParams = {}): Promise<AuditReport> {
   const res = await http.get("/v1/export/audit-report", { params });
+  return res.data;
+}
+
+// ─── Tool Baselines ───────────────────────────────────────────────────────────
+
+export interface BaselineSummary {
+  agent_id: string;
+  pending: number;
+  approved: number;
+  denied: number;
+  total: number;
+  last_seen_at: string | null;
+  enforcement_active: boolean;
+}
+
+export interface AgentTool {
+  tool_name: string;
+  tool_schema: Record<string, unknown>;
+  status: "pending" | "approved" | "denied";
+  call_count: number;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  approved_at: string | null;
+}
+
+export interface AgentToolsResponse {
+  agent_id: string;
+  org_id: string;
+  tools: AgentTool[];
+  counts: { pending: number; approved: number; denied: number; total: number };
+  enforcement_active: boolean;
+}
+
+/** Overview of all agents with baseline counts. */
+export async function listBaselines(): Promise<{ baselines: BaselineSummary[]; count: number }> {
+  const res = await http.get("/v1/baselines");
+  return res.data;
+}
+
+/** Full tool list for one agent with status, schema, and call counts. */
+export async function listAgentTools(agentId: string): Promise<AgentToolsResponse> {
+  const res = await http.get(`/v1/baselines/${agentId}/tools`);
+  return res.data;
+}
+
+/** Approve a single tool for an agent. */
+export async function approveTool(agentId: string, toolName: string): Promise<void> {
+  await http.post(`/v1/baselines/${agentId}/tools/${toolName}/approve`);
+}
+
+/** Deny a single tool for an agent. */
+export async function denyTool(agentId: string, toolName: string): Promise<void> {
+  await http.post(`/v1/baselines/${agentId}/tools/${toolName}/deny`);
+}
+
+/** Approve every pending tool for an agent in one click. */
+export async function approveAllTools(
+  agentId: string
+): Promise<{ approved_count: number; approved_tools: string[] }> {
+  const res = await http.post(`/v1/baselines/${agentId}/tools/approve-all`);
   return res.data;
 }

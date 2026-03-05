@@ -147,6 +147,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Rate limiting (added after CORS; Starlette processes in reverse-add order,
+# so rate limiting executes before CORS on the inbound path)
+from .middleware.rate_limit import RateLimitMiddleware  # noqa: E402
+app.add_middleware(RateLimitMiddleware, settings=settings)
+
 # Health check (no auth required)
 app.include_router(health_router, tags=["health"])
 
