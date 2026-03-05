@@ -5,9 +5,26 @@
 @layer base {
   body {
     @apply text-gray-900 antialiased;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
   }
 
   code, pre {
     @apply font-mono;
+  }
+}
+
+@layer utilities {
+  .scrollbar-sidebar::-webkit-scrollbar {
+    width: 4px;
+  }
+  .scrollbar-sidebar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-sidebar::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 9999px;
+  }
+  .scrollbar-sidebar::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
   }
 }
