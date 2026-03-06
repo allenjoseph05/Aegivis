@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
@@ -124,6 +124,28 @@ _FRAMEWORK_CONTROLS: dict[str, list[dict[str, str]]] = {
             "evidence_type": "violations",
         },
     ],
+    "gdpr": [
+        {
+            "id": "Art.5(1)(f)",
+            "name": "Integrity & Confidentiality",
+            "evidence_type": "chain_integrity",
+        },
+        {
+            "id": "Art.25",
+            "name": "Data Protection by Design",
+            "evidence_type": "pii",
+        },
+        {
+            "id": "Art.30",
+            "name": "Records of Processing Activities",
+            "evidence_type": "record_keeping",
+        },
+        {
+            "id": "Art.32",
+            "name": "Security of Processing",
+            "evidence_type": "injection",
+        },
+    ],
 }
 
 
@@ -146,6 +168,7 @@ FROM audit_events
 WHERE timestamp_ns BETWEEN :from_ts AND :to_ts
   AND (CAST(:org_id AS TEXT) IS NULL OR org_id = CAST(:org_id AS TEXT))
   AND (CAST(:agent_id AS TEXT) IS NULL OR agent_id = CAST(:agent_id AS TEXT))
+  AND (CAST(:session_id AS TEXT) IS NULL OR session_id = CAST(:session_id AS TEXT))
 """
 
 _VIOLATIONS_SUMMARY_SQL = """
@@ -157,6 +180,8 @@ FROM policy_violations
 WHERE timestamp_ns BETWEEN :from_ts AND :to_ts
   AND (CAST(:org_id AS TEXT) IS NULL OR org_id = CAST(:org_id AS TEXT))
   AND (CAST(:agent_id AS TEXT) IS NULL OR agent_id = CAST(:agent_id AS TEXT))
+  AND (CAST(:session_id AS TEXT) IS NULL OR session_id = CAST(:session_id AS TEXT))
+  AND (is_false_positive IS NULL OR is_false_positive = FALSE)
 GROUP BY rule_name, action
 ORDER BY count DESC
 """
@@ -181,6 +206,7 @@ FROM audit_events
 WHERE timestamp_ns BETWEEN :from_ts AND :to_ts
   AND (CAST(:org_id AS TEXT) IS NULL OR org_id = CAST(:org_id AS TEXT))
   AND (CAST(:agent_id AS TEXT) IS NULL OR agent_id = CAST(:agent_id AS TEXT))
+  AND (CAST(:session_id AS TEXT) IS NULL OR session_id = CAST(:session_id AS TEXT))
 ORDER BY session_id, sequence_number
 """
 
@@ -200,6 +226,8 @@ WHERE pv.action IN ('BLOCK', 'ALERT')
   AND pv.timestamp_ns BETWEEN :from_ts AND :to_ts
   AND (CAST(:org_id AS TEXT) IS NULL OR pv.org_id = CAST(:org_id AS TEXT))
   AND (CAST(:agent_id AS TEXT) IS NULL OR pv.agent_id = CAST(:agent_id AS TEXT))
+  AND (CAST(:session_id AS TEXT) IS NULL OR pv.session_id = CAST(:session_id AS TEXT))
+  AND (pv.is_false_positive IS NULL OR pv.is_false_positive = FALSE)
 ORDER BY pv.timestamp_ns DESC
 LIMIT 200
 """
@@ -358,12 +386,14 @@ def _compute_control_status(
             return "fail", "No events to verify chain integrity against"
         if chain_valid_pct < 100:
             return "fail", (
-                f"Hash-chain integrity FAILED for {chain_total - chain_valid} "
-                f"of {chain_total} session(s)"
+                f"Chain link structure FAILED for {chain_total - chain_valid} "
+                f"of {chain_total} session(s). "
+                f"Use Session Detail \u2192 Verify Chain for cryptographic detail."
             )
         return "pass", (
-            f"Hash-chain verified for all {chain_total} session(s) "
-            f"({chain_valid_pct:.0f}% valid)"
+            f"Chain link structure verified for all {chain_total} session(s) "
+            f"({chain_valid_pct:.0f}%). For full SHA-256 re-verification use "
+            f"Session Detail \u2192 Verify Chain."
         )
 
     if evidence_type == "anomalies":
@@ -391,7 +421,8 @@ async def build_audit_report(
     from_ts_ns: int,
     to_ts_ns: int,
     framework: str = "soc2",
-    agent_id: Optional[str] = None,
+    agent_id: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Build an org-wide compliance audit report for a date range.
@@ -402,8 +433,9 @@ async def build_audit_report(
     org_id      Organisation filter (default 'default-org').
     from_ts_ns  Period start in nanoseconds since epoch.
     to_ts_ns    Period end in nanoseconds since epoch.
-    framework   One of: owasp_asi_2026, eu_ai_act, hipaa, soc2.
+    framework   One of: owasp_asi_2026, eu_ai_act, hipaa, soc2, gdpr.
     agent_id    Optional agent filter.
+    session_id  Optional session filter (scopes report to a single session).
 
     Returns
     -------
@@ -420,6 +452,7 @@ async def build_audit_report(
         "to_ts": to_ts_ns,
         "org_id": org_id or None,
         "agent_id": agent_id or None,
+        "session_id": session_id or None,
     }
 
     # Run queries sequentially — SQLAlchemy AsyncSession cannot handle

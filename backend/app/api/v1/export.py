@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -52,13 +51,13 @@ class SplunkPushRequest(BaseModel):
         ),
     )
     hec_token: str = Field(..., description="Splunk HEC token (without 'Splunk ' prefix).")
-    index: str = Field("agentblackbox", description="Splunk index name.")
-    source: str = Field("agentblackbox-proxy", description="Splunk source field.")
+    index: str = Field("aegivis", description="Splunk index name.")
+    source: str = Field("aegivis-proxy", description="Splunk source field.")
     # Optional event filters
-    session_id: Optional[str] = Field(None, description="Filter to a single session.")
-    agent_id:   Optional[str] = Field(None, description="Filter to a single agent.")
-    from_ts_ns: Optional[int] = Field(None, description="Start timestamp (nanoseconds).")
-    to_ts_ns:   Optional[int] = Field(None, description="End timestamp (nanoseconds).")
+    session_id: str | None = Field(None, description="Filter to a single session.")
+    agent_id:   str | None = Field(None, description="Filter to a single agent.")
+    from_ts_ns: int | None = Field(None, description="Start timestamp (nanoseconds).")
+    to_ts_ns:   int | None = Field(None, description="End timestamp (nanoseconds).")
     limit: int = Field(5_000, ge=1, le=50_000, description="Maximum events to export.")
 
 
@@ -69,16 +68,16 @@ class ElasticPushRequest(BaseModel):
         ...,
         description="Elasticsearch base URL, e.g. https://es.example.com:9200",
     )
-    api_key: Optional[str] = Field(
+    api_key: str | None = Field(
         None,
         description="Elasticsearch API key (without 'ApiKey ' prefix). Omit for open clusters.",
     )
-    index: str = Field("agentblackbox", description="Elasticsearch index name.")
+    index: str = Field("aegivis", description="Elasticsearch index name.")
     # Optional event filters
-    session_id: Optional[str] = Field(None, description="Filter to a single session.")
-    agent_id:   Optional[str] = Field(None, description="Filter to a single agent.")
-    from_ts_ns: Optional[int] = Field(None, description="Start timestamp (nanoseconds).")
-    to_ts_ns:   Optional[int] = Field(None, description="End timestamp (nanoseconds).")
+    session_id: str | None = Field(None, description="Filter to a single session.")
+    agent_id:   str | None = Field(None, description="Filter to a single agent.")
+    from_ts_ns: int | None = Field(None, description="Start timestamp (nanoseconds).")
+    to_ts_ns:   int | None = Field(None, description="End timestamp (nanoseconds).")
     limit: int = Field(5_000, ge=1, le=50_000, description="Maximum events to export.")
 
 
@@ -101,11 +100,11 @@ class PushResult(BaseModel):
     response_class=StreamingResponse,
 )
 async def export_jsonlines(
-    session_id:   Optional[str]       = Query(None, description="Filter to a single session."),
-    agent_id:     Optional[str]       = Query(None, description="Filter to a single agent."),
-    from_ts_ns:   Optional[int]       = Query(None, description="Start timestamp (nanoseconds)."),
-    to_ts_ns:     Optional[int]       = Query(None, description="End timestamp (nanoseconds)."),
-    event_types:  Optional[list[str]] = Query(None, description="Restrict to these event types."),
+    session_id:   str | None       = Query(None, description="Filter to a single session."),
+    agent_id:     str | None       = Query(None, description="Filter to a single agent."),
+    from_ts_ns:   int | None       = Query(None, description="Start timestamp (nanoseconds)."),
+    to_ts_ns:     int | None       = Query(None, description="End timestamp (nanoseconds)."),
+    event_types:  list[str] | None = Query(None, description="Restrict to these event types."),
     limit:        int                 = Query(10_000, ge=1, le=100_000,
                                              description="Maximum events to stream."),
     db:           AsyncSession        = Depends(get_session),
@@ -129,7 +128,7 @@ async def export_jsonlines(
         generator,
         media_type="application/x-ndjson",
         headers={
-            "Content-Disposition": 'attachment; filename="agentblackbox-events.ndjson"',
+            "Content-Disposition": 'attachment; filename="aegivis-events.ndjson"',
             "X-Content-Type-Options": "nosniff",
         },
     )
@@ -210,19 +209,20 @@ async def export_to_elasticsearch(
     response_description="Compliance report with control pass/fail mappings.",
 )
 async def export_audit_report(
-    from_date: Optional[str] = Query(
+    from_date: str | None = Query(
         None,
         description="Period start date (ISO 8601: YYYY-MM-DD). Defaults to 30 days ago.",
     ),
-    to_date: Optional[str] = Query(
+    to_date: str | None = Query(
         None,
         description="Period end date (ISO 8601: YYYY-MM-DD). Defaults to today.",
     ),
     framework: str = Query(
         "soc2",
-        description="Compliance framework: owasp_asi_2026 | eu_ai_act | hipaa | soc2",
+        description="Compliance framework: owasp_asi_2026 | eu_ai_act | hipaa | soc2 | gdpr",
     ),
-    agent_id: Optional[str] = Query(None, description="Filter to a single agent."),
+    agent_id: str | None = Query(None, description="Filter to a single agent."),
+    session_id: str | None = Query(None, description="Filter to a single session."),
     db: AsyncSession = Depends(get_session),
     org_ctx: OrgContext = Depends(require_api_key),
 ):
@@ -237,7 +237,9 @@ async def export_audit_report(
                 tzinfo=timezone.utc
             )
         else:
-            from_dt = now - timedelta(days=30)
+            # When scoping to a single session use a wide default range so the
+            # caller does not need to know the session's exact date.
+            from_dt = datetime(2020, 1, 1, tzinfo=timezone.utc) if session_id else now - timedelta(days=30)
 
         if to_date:
             to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(
@@ -269,6 +271,7 @@ async def export_audit_report(
             to_ts_ns=to_ts_ns,
             framework=framework,
             agent_id=agent_id,
+            session_id=session_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

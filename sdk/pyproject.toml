@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agentblackbox"
+name = "aegivis"
 version = "1.0.0"
-description = "AgentBlackBox SDK — forensic audit trail for AI agents"
+description = "Aegivis SDK — forensic audit trail for AI agents"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 keywords = ["ai", "audit", "compliance", "llm", "agent", "forensics"]
@@ -24,9 +24,12 @@ dependencies = [
 
 [project.optional-dependencies]
 langchain = ["langchain-core>=0.2.0"]
+openai-agents = ["openai-agents>=0.0.3"]
+autogen = ["pyautogen>=0.2.0"]
+crewai = ["crewai>=0.28.0"]
 
 [project.scripts]
-agentblackbox = "agentblackbox.cli.verify:main"
+aegivis = "aegivis.cli.verify:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["agentblackbox"]
+packages = ["aegivis"]

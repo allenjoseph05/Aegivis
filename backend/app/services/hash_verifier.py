@@ -24,8 +24,26 @@ def _canonical_json(obj: dict, exclude_keys: set[str] | None = None) -> bytes:
 
 
 def recompute_hash(event: dict) -> str:
-    """Recompute the SHA-256 hash of an event (excluding current_hash field)."""
-    serialized = _canonical_json(event, exclude_keys={"current_hash", "received_at"})
+    """
+    Recompute the SHA-256 hash of an event.
+
+    Excludes ``current_hash`` and ``received_at`` (server-assigned fields that
+    are not part of the proxy-computed digest).  Also normalizes the
+    ``security`` key: when its value is ``None`` the key is stripped before
+    hashing, matching the proxy's behaviour of only inserting ``security``
+    when enforcement data actually exists.  Events without security context
+    (e.g. LLM_CALL_END, TOOL_CALL_END) are stored with ``security=NULL`` by
+    the ORM but were hashed *without* the key by the proxy, so including
+    ``"security":null`` would produce a systematic mismatch.
+    """
+    exclude = {"current_hash", "received_at"}
+    cleaned = {
+        k: v for k, v in event.items()
+        if k not in exclude and not (k == "security" and v is None)
+    }
+    serialized = json.dumps(
+        cleaned, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
     return hashlib.sha256(serialized).hexdigest()
 
 
