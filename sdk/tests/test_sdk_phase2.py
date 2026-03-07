@@ -16,7 +16,7 @@ import pytest
 
 # Make the SDK importable without installing
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from agentblackbox.session import Session
+from aegivis.session import Session
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +136,7 @@ def test_langchain_import_guard():
     """Importing the LangChain adapter without langchain-core raises ImportError."""
     # Force the adapter module to be reimported without langchain available
     # by temporarily hiding it from sys.modules
-    adapter_mod_name = "agentblackbox.adapters.langchain"
+    adapter_mod_name = "aegivis.adapters.langchain"
 
     # Remove cached import if present
     sys.modules.pop(adapter_mod_name, None)
@@ -146,8 +146,8 @@ def test_langchain_import_guard():
     # Simulate langchain_core not being installed
     import unittest.mock as mock
     with mock.patch.dict(sys.modules, {"langchain_core": None, "langchain_core.callbacks": None}):
-        with pytest.raises(ImportError, match="agentblackbox\\[langchain\\]"):
+        with pytest.raises(ImportError, match="aegivis\\[langchain\\]"):
             # Re-import to trigger the ImportError path
             if adapter_mod_name in sys.modules:
                 del sys.modules[adapter_mod_name]
-            import agentblackbox.adapters.langchain  # noqa: F401
+            import aegivis.adapters.langchain  # noqa: F401

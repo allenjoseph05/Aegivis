@@ -1,9 +1,9 @@
 """
-Tests for agentblackbox.scanner — phrase detection, delimiter detection,
+Tests for aegivis.scanner — phrase detection, delimiter detection,
 encoding detection, and score/label thresholds.
 """
 import pytest
-from agentblackbox.scanner import scan_text, MemoryScanResult
+from aegivis.scanner import scan_text, MemoryScanResult
 
 
 # ─── Basic API ────────────────────────────────────────────────────────────────
