@@ -24,6 +24,7 @@ const FRAMEWORKS: { value: ComplianceFramework; label: string }[] = [
   { value: "owasp_asi_2026", label: "OWASP ASI 2026" },
   { value: "eu_ai_act", label: "EU AI Act" },
   { value: "hipaa", label: "HIPAA §164.312" },
+  { value: "gdpr", label: "GDPR (Art.5/25/30/32)" },
 ];
 
 // ─── Helper: format ISO date for display ──────────────────────────────────────
@@ -74,16 +75,24 @@ function SummaryCards({ report }: { report: AuditReport }) {
     { label: "Blocked", value: s.blocked_count.toLocaleString(), highlight: s.blocked_count > 0 },
     { label: "Anomalies", value: s.anomalies.toLocaleString() },
     { label: "PII Events", value: s.pii_events.toLocaleString(), highlight: s.pii_events > 0 },
-    { label: "Chain Valid", value: `${s.chain_valid_pct}%`, ok: s.chain_valid_pct === 100 },
+    {
+      label: "Chain Valid",
+      value: `${s.chain_valid_pct}%`,
+      ok: s.chain_valid_pct === 100,
+      tooltip: "Structural link check only. Use Session Detail → Verify Chain for full SHA-256 cryptographic verification.",
+    },
     { label: "Memory Blocked", value: s.memory_blocked.toLocaleString() },
   ];
 
   return (
     <div className="grid grid-cols-3 sm:grid-cols-5 xl:grid-cols-9 gap-3 mb-6 print-summary">
-      {cards.map(({ label, value, highlight, ok }) => (
+      {cards.map(({ label, value, highlight, ok, tooltip }) => (
         <div
           key={label}
+          title={tooltip}
           className={`rounded-lg border p-3 text-center ${
+            tooltip ? "cursor-help" : ""
+          } ${
             highlight
               ? "border-red-200 bg-red-50"
               : ok === false
@@ -253,6 +262,15 @@ function ReportView({ report }: { report: AuditReport }) {
 
   return (
     <div id="audit-report-content" className="mt-6">
+      {/* Legal disclaimer — visible in browser and in Print-to-PDF */}
+      <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg print-disclaimer">
+        <p className="text-xs text-amber-800">
+          <strong>Notice:</strong> This is a technical evidence report documenting observed
+          security control activity. It is not a compliance certification. Legal compliance
+          determination requires qualified assessment against applicable regulatory requirements.
+        </p>
+      </div>
+
       {/* Report header */}
       <div className="flex items-start justify-between mb-4 pb-4 border-b">
         <div>
@@ -327,6 +345,7 @@ export function AuditReportPanel() {
           #audit-report-content * { visibility: visible; }
           #audit-report-content { position: absolute; top: 0; left: 0; width: 100%; }
           .print-summary { break-inside: avoid; }
+          .print-disclaimer { break-inside: avoid; }
           table { page-break-inside: auto; }
           tr { page-break-inside: avoid; }
         }

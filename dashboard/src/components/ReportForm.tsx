@@ -12,8 +12,8 @@ const REGULATIONS: { value: Regulation; label: string; description: string }[] =
   },
   {
     value: "gdpr",
-    label: "GDPR — Article 22",
-    description: "Automated decision-making with right to explanation",
+    label: "GDPR — Art.5/25/30/32",
+    description: "Integrity, privacy by design, records of processing, security of processing",
   },
   {
     value: "hipaa",
@@ -25,6 +25,11 @@ const REGULATIONS: { value: Regulation; label: string; description: string }[] =
     label: "SOC 2 Type II",
     description: "Security and availability trust service criteria",
   },
+  {
+    value: "owasp_asi_2026",
+    label: "OWASP ASI 2026",
+    description: "AI system injection and tool abuse prevention controls",
+  },
 ];
 
 interface ReportFormProps {
@@ -32,7 +37,7 @@ interface ReportFormProps {
   orgId?: string;
 }
 
-export function ReportForm({ sessionId, orgId = "default-org" }: ReportFormProps) {
+export function ReportForm({ sessionId, orgId: _orgId = "default-org" }: ReportFormProps) {
   const [selected, setSelected] = useState<Regulation>("eu_ai_act");
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<ComplianceReportResponse | null>(null);
@@ -58,7 +63,7 @@ export function ReportForm({ sessionId, orgId = "default-org" }: ReportFormProps
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `abb-${selected}-${sessionId}-${Date.now()}.json`;
+    a.download = `aegivis-${selected}-${sessionId}-${Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -127,6 +132,15 @@ export function ReportForm({ sessionId, orgId = "default-org" }: ReportFormProps
       {/* Report result */}
       {report && (
         <div className="border rounded-lg overflow-hidden">
+          {/* Legal disclaimer */}
+          <div className="px-4 py-3 bg-amber-50 border-b border-amber-200">
+            <p className="text-xs text-amber-800">
+              <strong>Notice:</strong> This is a technical evidence report documenting observed
+              security control activity. It is not a compliance certification. Legal compliance
+              determination requires qualified assessment against applicable regulatory requirements.
+            </p>
+          </div>
+
           {/* Header */}
           <div
             className={clsx(

@@ -79,9 +79,15 @@ def parse_response(body: dict) -> dict:
 
     response_text = None
     tool_calls = []
+    thinking_blocks: list[dict] = []
 
     for part in parts:
-        if "text" in part:
+        if part.get("thought"):
+            # Gemini thinking part (2.5 Flash/Pro, 2.0 Flash Thinking)
+            text = part.get("text", "")
+            if text:
+                thinking_blocks.append({"thinking": text, "signature": None})
+        elif "text" in part:
             response_text = part["text"]
         elif "functionCall" in part:
             fc = part["functionCall"]
@@ -105,6 +111,7 @@ def parse_response(body: dict) -> dict:
         "finish_reason": finish_reason,
         "tool_calls": tool_calls,
         "token_usage": token_usage,
+        "thinking_blocks": thinking_blocks,
     }
 
 
@@ -124,6 +131,7 @@ def parse_sse_chunk(chunk_data: str) -> dict | None:
         "finish_reason": parsed["finish_reason"],
         "tool_calls_delta": None,
         "usage": parsed["token_usage"],
+        "thinking_blocks": parsed.get("thinking_blocks") or [],
     }
 
 
@@ -133,6 +141,7 @@ class SSEAssembler:
         self._finish_reason: str | None = None
         self._tool_calls: list[dict] = []
         self._usage: dict | None = None
+        self._thinking_blocks: list[dict] = []
 
     def feed(self, chunk: dict | None) -> bool:
         if chunk is None:
@@ -143,6 +152,8 @@ class SSEAssembler:
             self._finish_reason = chunk["finish_reason"]
         if chunk.get("usage"):
             self._usage = chunk["usage"]
+        if chunk.get("thinking_blocks"):
+            self._thinking_blocks.extend(chunk["thinking_blocks"])
         return self._finish_reason is not None
 
     def build_response(self) -> dict:
@@ -151,6 +162,7 @@ class SSEAssembler:
             "finish_reason": self._finish_reason,
             "tool_calls": self._tool_calls,
             "token_usage": self._usage,
+            "thinking_blocks": self._thinking_blocks or None,
         }
 
 
