@@ -14,6 +14,7 @@ request.  Revoked keys are visible within 60 s of revocation.
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from dataclasses import dataclass
 
@@ -24,6 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..db.connection import get_session
+
+logger = logging.getLogger(__name__)
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -60,6 +63,7 @@ async def require_api_key(
             return ctx
 
     # DB lookup
+    db_error: Exception | None = None
     try:
         row = (
             await db.execute(
@@ -70,7 +74,9 @@ async def require_api_key(
                 {"h": key_hash},
             )
         ).fetchone()
-    except Exception:
+    except Exception as e:
+        logger.warning("DB unavailable during API key lookup: %s", e)
+        db_error = e
         row = None
 
     if row:
@@ -79,6 +85,13 @@ async def require_api_key(
         # Backward-compat: keys declared in config belong to default-org.
         # Remove from config list once the api_keys table is fully provisioned.
         ctx = OrgContext(org_id="default-org", key_name="config-key")
+    elif db_error is not None:
+        # DB is down and the key isn't in the config fallback list.
+        # Return 503 so callers know this is transient, not an auth failure.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service temporarily unavailable",
+        )
     else:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

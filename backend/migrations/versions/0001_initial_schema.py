@@ -80,12 +80,12 @@ def upgrade() -> None:
     op.execute("""
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'abb_app') THEN
-                CREATE ROLE abb_app;
+            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'aegivis_app') THEN
+                CREATE ROLE aegivis_app;
             END IF;
         END $$
     """)
-    op.execute("REVOKE UPDATE, DELETE ON audit_events FROM abb_app")
+    op.execute("REVOKE UPDATE, DELETE ON audit_events FROM aegivis_app")
 
 
 def downgrade() -> None:

@@ -45,16 +45,17 @@ async def get_session_events(
     org_id: str,
     limit: int = 1000,
     offset: int = 0,
+    event_type: str | None = None,
 ) -> list[dict]:
-    """Fetch all events for a session, ordered by sequence_number."""
+    """Fetch events for a session, ordered by sequence_number."""
     stmt = (
         select(AuditEventORM)
         .where(AuditEventORM.session_id == session_id)
         .where(AuditEventORM.org_id == org_id)
-        .order_by(AuditEventORM.sequence_number)
-        .limit(limit)
-        .offset(offset)
     )
+    if event_type:
+        stmt = stmt.where(AuditEventORM.event_type == event_type)
+    stmt = stmt.order_by(AuditEventORM.sequence_number).limit(limit).offset(offset)
     result = await db.execute(stmt)
     return [row.to_dict() for row in result.scalars()]
 
@@ -64,7 +65,14 @@ async def get_session_summary(
     session_id: str,
     org_id: str,
 ) -> dict | None:
-    """Compute session summary stats from event table."""
+    """Compute session summary stats from event table.
+
+    Note: agent_id, provider, and model use MIN() as a representative value.
+    For single-agent sessions this is exact. For multi-agent sessions this
+    returns an arbitrary value (alphabetically first). If you need the most
+    common value, use MODE() WITHIN GROUP (ORDER BY agent_id) — not used here
+    because TimescaleDB may not support it on hypertable chunks.
+    """
     stmt = text("""
         SELECT
             session_id,
@@ -77,7 +85,7 @@ async def get_session_summary(
             COUNT(*) AS event_count,
             COUNT(*) FILTER (WHERE event_type = 'LLM_CALL_START') AS llm_call_count,
             COUNT(*) FILTER (WHERE event_type IN ('TOOL_CALL_START')) AS tool_call_count,
-            SUM(CAST(payload->>'total_tokens' AS INTEGER)) FILTER (WHERE event_type = 'LLM_CALL_END') AS total_tokens,
+            COALESCE(SUM(CAST(NULLIF(payload->>'total_tokens', '') AS INTEGER)) FILTER (WHERE event_type = 'LLM_CALL_END' AND payload->>'total_tokens' IS NOT NULL), 0) AS total_tokens,
             BOOL_AND(current_hash IS NOT NULL) AS has_hashes,
             COUNT(*) FILTER (WHERE event_type = 'SYSTEM_ERROR') > 0 AS has_errors
         FROM audit_events
@@ -123,7 +131,7 @@ async def list_sessions(
             COUNT(*) FILTER (WHERE event_type = 'LLM_CALL_START') AS llm_call_count,
             COUNT(*) FILTER (WHERE event_type = 'TOOL_CALL_START') AS tool_call_count,
             COALESCE(SUM(
-                CAST(payload->>'total_tokens' AS INTEGER)
+                CAST(NULLIF(payload->>'total_tokens', '') AS INTEGER)
             ) FILTER (WHERE event_type = 'LLM_CALL_END' AND payload->>'total_tokens' IS NOT NULL), 0) AS total_tokens,
             COUNT(*) FILTER (WHERE event_type = 'SYSTEM_ERROR') > 0 AS has_errors
         FROM audit_events

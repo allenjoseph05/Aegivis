@@ -14,7 +14,7 @@ def _make_settings(**kwargs) -> BackendSettings:
         rate_limit_enabled=kwargs.get("rate_limit_enabled", True),
         rate_limit_per_minute=kwargs.get("rate_limit_per_minute", 300),
         rate_limit_ingest_per_minute=kwargs.get("rate_limit_ingest_per_minute", 3000),
-        database_url="postgresql+asyncpg://abb:abb@localhost:5432/agentblackbox",
+        database_url="postgresql+asyncpg://aegivis:abb@localhost:5432/aegivis",
     )
 
 
