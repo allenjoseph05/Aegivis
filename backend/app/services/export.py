@@ -250,7 +250,7 @@ def _to_splunk_event(evt: dict[str, Any], index: str, source: str) -> dict[str, 
         "time":       ts_ns / 1_000_000_000 if ts_ns else None,
         "index":      index,
         "source":     source,
-        "sourcetype": "agentblackbox",
+        "sourcetype": "aegivis",
         "host":       evt.get("agent_id", "unknown"),
         "event":      evt,
     }
@@ -262,13 +262,13 @@ async def push_to_splunk(
     org_id: str,
     hec_url: str,
     hec_token: str,
-    index: str = "agentblackbox",
+    index: str = "aegivis",
     session_id: str | None = None,
     agent_id:   str | None = None,
     from_ts_ns: int | None = None,
     to_ts_ns:   int | None = None,
     limit: int = 5_000,
-    source: str = "agentblackbox-proxy",
+    source: str = "aegivis-proxy",
 ) -> dict[str, Any]:
     """
     Fetch events and push them to a Splunk HEC endpoint in batches.
@@ -350,7 +350,7 @@ async def push_to_elasticsearch(
     org_id: str,
     es_url: str,
     api_key: str | None = None,
-    index: str = "agentblackbox",
+    index: str = "aegivis",
     session_id: str | None = None,
     agent_id:   str | None = None,
     from_ts_ns: int | None = None,

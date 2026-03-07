@@ -1,5 +1,5 @@
 """
-Sliding-window rate limiting middleware for the AgentBlackBox backend.
+Sliding-window rate limiting middleware for the Aegivis backend.
 
 Keyed by SHA-256 prefix of X-API-Key header, falling back to client IP.
 Two limit tiers:

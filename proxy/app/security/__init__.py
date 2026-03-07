@@ -1,5 +1,5 @@
 """
-AgentBlackBox security scanning package.
+Aegivis security scanning package.
 
 Injection detection is handled exclusively by the enforcement/ sync-path
 module (enforcement.scan_messages). This package covers the remaining

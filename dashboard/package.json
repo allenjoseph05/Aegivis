@@ -1,5 +1,5 @@
 {
-  "name": "agentblackbox-dashboard",
+  "name": "aegivis-dashboard",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "lint": "eslint src --ext .ts,.tsx",
+    "lint": "tsc --noEmit --noUnusedLocals --noUnusedParameters",
     "test": "vitest",
     "test:run": "vitest run",
     "test:ui": "vitest --ui",
@@ -15,10 +15,8 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.51.0",
-    "@types/d3": "^7.4.3",
     "axios": "^1.7.3",
     "clsx": "^2.1.1",
-    "d3": "^7.9.0",
     "date-fns": "^3.6.0",
     "lucide-react": "^0.414.0",
     "react": "^18.3.1",

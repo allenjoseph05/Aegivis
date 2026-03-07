@@ -16,7 +16,7 @@ enforcement layer + canary + output_scanner.
 
 Install
 -------
-    pip install 'agentblackbox-proxy[classifier]'
+    pip install 'aegivis-proxy[classifier]'
     # requires: transformers, torch
 """
 from __future__ import annotations

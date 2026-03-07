@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class BackendSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="ABB_", case_sensitive=False)
+    model_config = SettingsConfigDict(env_prefix="AEGIVIS_", case_sensitive=False)
 
     # FastAPI
     host: str = "0.0.0.0"
@@ -14,7 +14,7 @@ class BackendSettings(BaseSettings):
     log_level: str = "INFO"
 
     # PostgreSQL
-    database_url: str = "postgresql+asyncpg://abb:abb@localhost:5432/agentblackbox"
+    database_url: str = "postgresql+asyncpg://aegivis:abb@localhost:5432/aegivis"
 
     # Auth
     api_keys: list[str] = ["dev-proxy-key", "dev-dashboard-key"]
@@ -31,7 +31,7 @@ class BackendSettings(BaseSettings):
     smtp_port: int = 587
     smtp_user: str = ""
     smtp_password: str = ""
-    smtp_from: str = "alerts@agentblackbox.local"
+    smtp_from: str = "alerts@aegivis.local"
     smtp_to: str = ""
 
     # Slack webhook alerts (optional — leave empty to disable)
@@ -52,12 +52,12 @@ class BackendSettings(BaseSettings):
     # SIEM export — Splunk HEC (optional defaults; overridden per-request)
     splunk_hec_url:   str = ""
     splunk_hec_token: str = ""
-    splunk_index:     str = "agentblackbox"
+    splunk_index:     str = "aegivis"
 
     # SIEM export — Elasticsearch (optional defaults; overridden per-request)
     elastic_url:      str = ""
     elastic_api_key:  str = ""
-    elastic_index:    str = "agentblackbox"
+    elastic_index:    str = "aegivis"
 
     # -------------------------------------------------------------------------
     # Prometheus metrics (Phase 3.4)
@@ -69,7 +69,7 @@ class BackendSettings(BaseSettings):
     # -------------------------------------------------------------------------
     otel_enabled: bool = False
     otel_endpoint: str = "http://localhost:4317"
-    otel_service_name: str = "agentblackbox-backend"
+    otel_service_name: str = "aegivis-backend"
 
     # -------------------------------------------------------------------------
     # Rate limiting — sliding-window counter keyed by API key or client IP
@@ -80,9 +80,19 @@ class BackendSettings(BaseSettings):
 
     # -------------------------------------------------------------------------
     # Redis (optional) — Redis Streams event pipeline + distributed state
-    # Set ABB_REDIS_URL to enable (e.g. "redis://redis:6379/0")
+    # Set AEGIVIS_REDIS_URL to enable (e.g. "redis://redis:6379/0")
     # -------------------------------------------------------------------------
     redis_url: str = ""
+
+    # -------------------------------------------------------------------------
+    # Capability Manifests (Phase 12)
+    # -------------------------------------------------------------------------
+    # HMAC-SHA256 signing key for capability manifests.
+    # Must match AEGIVIS_MANIFEST_SIGNING_KEY on the proxy.
+    # If empty, signing/verification is skipped (development only).
+    # Production: set to a 32+ char random string.
+    # Example: AEGIVIS_MANIFEST_SIGNING_KEY=$(openssl rand -hex 32)
+    manifest_signing_key: str = ""
 
 
 settings = BackendSettings()

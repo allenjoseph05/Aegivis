@@ -1,6 +1,6 @@
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Loader2, Wrench, Brain, AlertCircle } from "lucide-react";
+import { ArrowLeft, Loader2, Wrench, AlertCircle } from "lucide-react";
 import { getForensicReplay } from "../api/client";
 import { HashBadge } from "../components/HashBadge";
 import { RiskPanel } from "../components/RiskPanel";
@@ -11,9 +11,6 @@ function formatMs(ms: number): string {
   return `${(ms / 1000).toFixed(2)}s`;
 }
 
-function formatNs(ns: number): string {
-  return new Date(ns / 1_000_000).toISOString().replace("T", " ").slice(0, 23);
-}
 
 export function Forensics() {
   const { sessionId } = useParams<{ sessionId: string }>();

@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import time
 import pytest
+from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.db.connection import get_session
 
 client = TestClient(app)
 HEADERS = {"X-API-Key": "dev-proxy-key"}
@@ -92,3 +94,24 @@ class TestViolationsEndpoint:
         assert resp.status_code == 200
         body = resp.json()
         assert "summary" in body
+
+    def test_all_inserts_fail_returns_503(self):
+        """When every DB insert fails, endpoint must return 503 (not 202 with accepted=0)."""
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(side_effect=Exception("DB connection lost"))
+        mock_db.rollback = AsyncMock()
+
+        async def _failing_session():
+            yield mock_db
+
+        app.dependency_overrides[get_session] = _failing_session
+        try:
+            resp = client.post(
+                "/v1/violations",
+                json={"violations": [_make_violation()], "sent_at_ns": time.time_ns()},
+                headers=HEADERS,
+            )
+        finally:
+            app.dependency_overrides.pop(get_session, None)
+
+        assert resp.status_code == 503

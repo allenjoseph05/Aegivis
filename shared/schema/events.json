@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://agentblackbox.io/schema/v1/events.json",
-  "title": "AgentBlackBox Canonical Event Schema",
+  "$id": "https://aegivis.io/schema/v1/events.json",
+  "title": "Aegivis Canonical Event Schema",
   "version": "1.0",
   "definitions": {
     "EventType": {

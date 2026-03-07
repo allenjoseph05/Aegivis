@@ -1,4 +1,4 @@
-"""Provider-specific request/response parsers for the AgentBlackBox proxy."""
+"""Provider-specific request/response parsers for the Aegivis proxy."""
 from .openai import OpenAIProvider
 from .anthropic import AnthropicProvider
 from .google import GoogleProvider

@@ -1,0 +1,138 @@
+# Aegivis Helm chart values
+# Override with: helm install aegivis ./helm/aegivis -f my-values.yaml
+
+# ─── Global ──────────────────────────────────────────────────────────────────
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+
+# ─── Proxy ───────────────────────────────────────────────────────────────────
+proxy:
+  replicaCount: 1
+  image:
+    repository: aegivis/proxy
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: "256Mi"   # ML classifier (~200 MB) + overhead
+      cpu: "200m"
+    limits:
+      memory: "1Gi"     # DeBERTa model can spike to ~700 MB; give headroom
+      cpu: "1000m"      # burst for per-request ML inference
+  service:
+    type: ClusterIP
+    port: 8080
+  env:
+    AEGIVIS_ORG_ID: "default-org"
+    AEGIVIS_LOG_LEVEL: "INFO"
+    AEGIVIS_PII_ENABLED: "true"
+    AEGIVIS_METRICS_ENABLED: "true"
+    AEGIVIS_OTEL_ENABLED: "false"
+  # Set LLM API keys via secret (see secret.yaml)
+  secretName: "aegivis-secrets"
+
+# ─── Backend ─────────────────────────────────────────────────────────────────
+backend:
+  replicaCount: 1
+  image:
+    repository: aegivis/backend
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"   # async DB pool + Redis Streams consumer
+      cpu: "500m"
+  service:
+    type: ClusterIP
+    port: 8000
+  env:
+    AEGIVIS_LOG_LEVEL: "INFO"
+    AEGIVIS_DEBUG: "false"
+    AEGIVIS_METRICS_ENABLED: "true"
+    AEGIVIS_OTEL_ENABLED: "false"
+  secretName: "aegivis-secrets"
+
+# ─── Dashboard ───────────────────────────────────────────────────────────────
+dashboard:
+  replicaCount: 1
+  image:
+    repository: aegivis/dashboard
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "200m"       # nginx static serving; burst for gzip compression
+  service:
+    type: ClusterIP
+    port: 80
+
+# ─── PostgreSQL ───────────────────────────────────────────────────────────────
+postgres:
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  persistence:
+    enabled: true
+    size: "10Gi"
+    storageClass: ""   # use cluster default
+  service:
+    type: ClusterIP
+    port: 5432
+  # Credentials -- always use a K8s Secret in production
+  secretName: "aegivis-secrets"
+
+# ─── Network Policy ──────────────────────────────────────────────────────────
+# Restrict pod-to-pod traffic: proxy → backend only, backend → postgres + redis
+networkPolicy:
+  enabled: false   # enable in production environments with CNI support (Calico, Cilium, Weave)
+
+# ─── Pod Disruption Budgets ───────────────────────────────────────────────────
+# Prevents all pods from being evicted simultaneously during node maintenance
+podDisruptionBudget:
+  enabled: false   # enable when replicaCount > 1
+  proxy:
+    minAvailable: 1
+  backend:
+    minAvailable: 1
+
+# ─── Ingress ─────────────────────────────────────────────────────────────────
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: aegivis.example.com
+      paths:
+        - path: /api
+          pathType: Prefix
+          service: backend
+          port: 8000
+        - path: /proxy
+          pathType: Prefix
+          service: proxy
+          port: 8080
+        - path: /
+          pathType: Prefix
+          service: dashboard
+          port: 80
+  tls: []
+  #  - secretName: aegivis-tls
+  #    hosts:
+  #      - aegivis.example.com

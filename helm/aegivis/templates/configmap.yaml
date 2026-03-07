@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aegivis.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aegivis.labels" . | nindent 4 }}
+data:
+  # Proxy configuration
+  AEGIVIS_ORG_ID: {{ .Values.proxy.env.AEGIVIS_ORG_ID | quote }}
+  AEGIVIS_LOG_LEVEL: {{ .Values.proxy.env.AEGIVIS_LOG_LEVEL | quote }}
+  AEGIVIS_PII_ENABLED: {{ .Values.proxy.env.AEGIVIS_PII_ENABLED | quote }}
+  AEGIVIS_METRICS_ENABLED: {{ .Values.proxy.env.AEGIVIS_METRICS_ENABLED | quote }}
+  AEGIVIS_OTEL_ENABLED: {{ .Values.proxy.env.AEGIVIS_OTEL_ENABLED | quote }}
+  AEGIVIS_BACKEND_URL: {{ printf "http://%s-backend:%d" (include "aegivis.fullname" .) (.Values.backend.service.port | int) | quote }}
+  # Backend configuration
+  AEGIVIS_CORS_ORIGINS: {{ printf "[\"http://%s-dashboard:%d\"]" (include "aegivis.fullname" .) (.Values.dashboard.service.port | int) | quote }}

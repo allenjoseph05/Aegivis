@@ -6,8 +6,8 @@ persistent session fields in Redis instead of a process-local dict.
 
 Key schema
 ----------
-    abb:sess:{session_id}         — JSON blob (all persistent SessionState fields)
-    abb:idx:fuh:{first_user_hash} — string (session_id lookup by first-user hash)
+    aegivis:sess:{session_id}         — JSON blob (all persistent SessionState fields)
+    aegivis:idx:fuh:{first_user_hash} — string (session_id lookup by first-user hash)
 
 Both keys carry a 4-hour TTL (refreshed on every write).
 
@@ -42,8 +42,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SESSION_TTL = 4 * 3600          # 4 hours in seconds
-_KEY_PREFIX_SESS = "abb:sess:"
-_KEY_PREFIX_FUH  = "abb:idx:fuh:"
+_KEY_PREFIX_SESS = "aegivis:sess:"
+_KEY_PREFIX_FUH  = "aegivis:idx:fuh:"
 
 
 class RedisSessionTracker:

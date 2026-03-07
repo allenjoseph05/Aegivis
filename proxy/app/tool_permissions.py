@@ -1,5 +1,5 @@
 """
-Tool Permissions Engine for AgentBlackBox proxy.
+Tool Permissions Engine for Aegivis proxy.
 
 Evaluates per-tool, per-agent access control rules defined in a YAML file.
 These rules are checked at every TOOL_CALL_START event, BEFORE the main
@@ -361,7 +361,7 @@ def reload_tool_permissions_engine(
 
 def _load_default() -> ToolPermissionsEngine:
     """
-    Load engine from ABB_TOOL_PERMISSIONS_YAML or the bundled example file.
+    Load engine from AEGIVIS_TOOL_PERMISSIONS_YAML or the bundled example file.
     All rules in the bundled example are disabled, so this is a no-op
     unless the user explicitly sets enabled: true on a rule.
     """
@@ -372,7 +372,7 @@ def _load_default() -> ToolPermissionsEngine:
         if p.exists():
             return ToolPermissionsEngine.from_yaml(p)
         logger.warning(
-            "ABB_TOOL_PERMISSIONS_YAML=%s not found; "
+            "AEGIVIS_TOOL_PERMISSIONS_YAML=%s not found; "
             "starting with no tool permission rules.",
             settings.tool_permissions_yaml,
         )

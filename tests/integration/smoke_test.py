@@ -1,5 +1,5 @@
 """
-AgentBlackBox end-to-end integration smoke tests.
+Aegivis end-to-end integration smoke tests.
 
 Validates the proxy → (Redis) → backend → PostgreSQL chain against a live
 Docker Compose stack.  All tests are marked @pytest.mark.integration so they
@@ -10,9 +10,9 @@ Run:
     pytest tests/integration/ -m integration -v
 
 With custom endpoints:
-    ABB_PROXY_URL=http://localhost:8080 \
-    ABB_BACKEND_URL=http://localhost:8000 \
-    ABB_API_KEY=dev-dashboard-key \
+    AEGIVIS_PROXY_URL=http://localhost:8080 \
+    AEGIVIS_BACKEND_URL=http://localhost:8000 \
+    AEGIVIS_API_KEY=dev-dashboard-key \
     pytest tests/integration/ -m integration -v
 """
 from __future__ import annotations
@@ -78,8 +78,8 @@ def test_injection_blocked_at_proxy(proxy_client: httpx.Client):
             "Content-Type": "application/json",
             "x-api-key": "test-key",
             "anthropic-version": "2023-06-01",
-            "X-ABB-Agent-Id": "integration-smoke-test",
-            "X-ABB-Session-Id": "smoke-session-001",
+            "X-Aegivis-Agent-Id": "integration-smoke-test",
+            "X-Aegivis-Session-Id": "smoke-session-001",
         },
     )
     assert resp.status_code == 403, (

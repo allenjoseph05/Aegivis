@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Optional
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -179,11 +178,11 @@ async def get_baseline(
     db: AsyncSession,
     org_id: str,
     agent_id: str,
-) -> Optional[dict]:
+) -> dict | None:
     return await _get_baseline(db, org_id, agent_id)
 
 
-async def _get_baseline(db: AsyncSession, org_id: str, agent_id: str) -> Optional[dict]:
+async def _get_baseline(db: AsyncSession, org_id: str, agent_id: str) -> dict | None:
     result = await db.execute(
         text("""
             SELECT session_count, avg_llm_calls, avg_tool_calls,

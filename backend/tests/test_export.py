@@ -284,7 +284,7 @@ class TestToSplunkEvent:
         wrapped = _to_splunk_event(evt, "my-index", "my-source")
         assert wrapped["index"] == "my-index"
         assert wrapped["source"] == "my-source"
-        assert wrapped["sourcetype"] == "agentblackbox"
+        assert wrapped["sourcetype"] == "aegivis"
         assert wrapped["host"] == "agent-1"
         assert "event" in wrapped
 
@@ -358,7 +358,7 @@ class TestExportJsonlines:
         mock_stream.return_value = _gen()
 
         resp = client.get("/v1/export/jsonlines", headers=HEADERS)
-        assert "agentblackbox-events.ndjson" in resp.headers.get("content-disposition", "")
+        assert "aegivis-events.ndjson" in resp.headers.get("content-disposition", "")
 
     @patch("app.api.v1.export.stream_jsonlines")
     def test_filter_params_passed_through(self, mock_stream):

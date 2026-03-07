@@ -329,7 +329,7 @@ export interface Session {
 
 def main():
     schema = json.loads(SCHEMA_PATH.read_text())
-    root = SCHEMA_PATH.parent.parent.parent  # agentblackbox root
+    root = SCHEMA_PATH.parent.parent.parent  # aegivis root
 
     pydantic_code = generate_pydantic()
     ts_code = generate_typescript()

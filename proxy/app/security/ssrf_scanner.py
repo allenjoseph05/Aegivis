@@ -12,7 +12,7 @@ Detection layers (applied in order):
                            whether the resolved host falls in any reserved range.
   4. Cloud-metadata check — hard-block well-known cloud metadata endpoints
                             regardless of allowlist (169.254.169.254 etc.).
-  5. Allowlist check   — configured via ``ABB_SECURITY_SSRF_ALLOWED_DOMAINS``.
+  5. Allowlist check   — configured via ``AEGIVIS_SECURITY_SSRF_ALLOWED_DOMAINS``.
                          If a non-empty allowlist is set, any host not on it
                          is blocked.  Empty allowlist = audit-only mode.
   6. DNS resolution    — optionally resolve the hostname to its IP address(es)

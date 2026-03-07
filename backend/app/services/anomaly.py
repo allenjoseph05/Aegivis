@@ -1,7 +1,7 @@
 """
 Rule-based anomaly detection engine (Phase 1 foundation).
 
-8 detection rules based on the AgentBlackBox spec:
+8 detection rules based on the Aegivis spec:
 1. Excessive token usage (> 3x rolling avg)
 2. Rapid tool call loops (same tool called > 5x in one session)
 3. Error rate spike (> 3 errors in a session)

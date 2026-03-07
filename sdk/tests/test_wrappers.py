@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 from unittest.mock import MagicMock, call
 
-from agentblackbox.memory import (
+from aegivis.memory import (
     ScanConfig,
     MemoryInjectionError,
     wrap_chroma,

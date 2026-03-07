@@ -1,5 +1,5 @@
 """
-End-to-end integration tests for the AgentBlackBox proxy.
+End-to-end integration tests for the Aegivis proxy.
 
 These tests exercise the full request pipeline with:
   - The real FastAPI app (including lifespan)
@@ -125,7 +125,7 @@ _CHAT_REQUEST = {
 _HEADERS = {
     "Content-Type": "application/json",
     "Authorization": "Bearer sk-test",
-    "x-abb-agent-id": "integration-test-agent",
+    "x-aegivis-agent-id": "integration-test-agent",
 }
 
 
@@ -139,7 +139,7 @@ class TestHealthCheck:
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "ok"
-        assert body["service"] == "agentblackbox-proxy"
+        assert body["service"] == "aegivis-proxy"
         assert "providers" in body
         assert "openai" in body["providers"]
         assert "policy_rules" in body
@@ -172,7 +172,7 @@ class TestPolicyEndpoints:
         assert "enabled" in body
 
     def test_reload_policies_without_admin_key(self, proxy_app):
-        """When ABB_ADMIN_API_KEY is empty (default), reload is open."""
+        """When AEGIVIS_ADMIN_API_KEY is empty (default), reload is open."""
         resp = proxy_app.post("/policies/reload", json={})
         assert resp.status_code == 200
         body = resp.json()
@@ -204,7 +204,7 @@ class TestNormalChatRequest:
 
     @respx.mock
     def test_session_id_header_returned(self, proxy_app):
-        """Proxy attaches X-ABB-Session-ID header when a block occurs."""
+        """Proxy attaches X-Aegivis-Session-ID header when a block occurs."""
         # Test via a BLOCK scenario so we get the header directly
         respx.post(_OPENAI_CHAT_URL).mock(
             return_value=httpx.Response(200, json=_openai_chat_response())
@@ -227,7 +227,7 @@ class TestNormalChatRequest:
         resp = proxy_app.post(
             "/openai/v1/chat/completions",
             json=_CHAT_REQUEST,
-            headers={**_HEADERS, "x-abb-session-id": f"sess-enqueue-{uuid.uuid4().hex[:8]}"},
+            headers={**_HEADERS, "x-aegivis-session-id": f"sess-enqueue-{uuid.uuid4().hex[:8]}"},
         )
         assert resp.status_code == 200
         # Transport.enqueue should have been called at least once (LLM_CALL_START)
@@ -243,7 +243,7 @@ class TestNormalChatRequest:
         resp = proxy_app.post(
             "/openai/v1/chat/completions",
             json=_CHAT_REQUEST,
-            headers={**_HEADERS, "x-abb-session-id": f"sess-type-{uuid.uuid4().hex[:8]}"},
+            headers={**_HEADERS, "x-aegivis-session-id": f"sess-type-{uuid.uuid4().hex[:8]}"},
         )
         assert resp.status_code == 200
         # First enqueue call should be LLM_CALL_START
@@ -264,7 +264,7 @@ class TestNormalChatRequest:
         resp = proxy_app.post(
             "/openai/v1/chat/completions",
             json=_CHAT_REQUEST,
-            headers={**_HEADERS, "x-abb-session-id": session_id},
+            headers={**_HEADERS, "x-aegivis-session-id": session_id},
         )
         assert resp.status_code == 200
         first_event = mock_transport.enqueue.call_args_list[0][0][0]
@@ -279,7 +279,7 @@ class TestNormalChatRequest:
 
 class TestAgentKeyAuth:
     def test_no_key_allowed_by_default(self, proxy_app):
-        """When ABB_REQUIRE_AGENT_KEY is False (default), requests without key pass."""
+        """When AEGIVIS_REQUIRE_AGENT_KEY is False (default), requests without key pass."""
         # The proxy uses validate_agent_key which returns True for empty key when
         # require_agent_key=False (the default)
         with respx.mock:
@@ -295,7 +295,7 @@ class TestAgentKeyAuth:
         assert resp.status_code == 200
 
     def test_invalid_key_rejected_when_keys_configured(self, proxy_app):
-        """When ABB_AGENT_KEYS is set, invalid keys return 401."""
+        """When AEGIVIS_AGENT_KEYS is set, invalid keys return 401."""
         from proxy.app.config import settings
         original_keys = settings.agent_keys
         original_require = settings.require_agent_key
@@ -309,7 +309,7 @@ class TestAgentKeyAuth:
                 json=_CHAT_REQUEST,
                 headers={
                     "Content-Type": "application/json",
-                    "x-abb-agent-key": "wrong-key",
+                    "x-aegivis-agent-key": "wrong-key",
                 },
             )
             assert resp.status_code == 401
@@ -338,7 +338,7 @@ class TestPolicyBlock:
         from proxy.app.session import get_session_tracker
 
         session_id = f"sess-runaway-{uuid.uuid4().hex[:8]}"
-        session_headers = {**_HEADERS, "x-abb-session-id": session_id}
+        session_headers = {**_HEADERS, "x-aegivis-session-id": session_id}
 
         # Pre-populate session state above the block threshold (gt 100)
         tracker = get_session_tracker()
@@ -372,11 +372,11 @@ class TestPolicyBlock:
 
     @respx.mock
     def test_block_response_has_policy_headers(self, proxy_app):
-        """403 response includes X-ABB-Policy-Rule and X-ABB-Session-ID headers."""
+        """403 response includes X-Aegivis-Policy-Rule and X-Aegivis-Session-ID headers."""
         from proxy.app.session import get_session_tracker
 
         session_id = f"sess-hdr-{uuid.uuid4().hex[:8]}"
-        headers = {**_HEADERS, "x-abb-session-id": session_id}
+        headers = {**_HEADERS, "x-aegivis-session-id": session_id}
 
         # Inject session state above threshold
         tracker = get_session_tracker()
@@ -397,8 +397,8 @@ class TestPolicyBlock:
         assert resp.status_code == 403
         # Response headers carry the rule name and session ID
         resp_headers_lower = {h.lower() for h in resp.headers}
-        assert "x-abb-policy-rule" in resp_headers_lower
-        assert "x-abb-session-id" in resp_headers_lower
+        assert "x-aegivis-policy-rule" in resp_headers_lower
+        assert "x-aegivis-session-id" in resp_headers_lower
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +409,7 @@ class TestCanaryInjection:
     @respx.mock
     def test_canary_injected_into_forward_body(self, proxy_app):
         """
-        When security is enabled and ABB_SECURITY_CANARY_ENABLED=True, the
+        When security is enabled and AEGIVIS_SECURITY_CANARY_ENABLED=True, the
         request forwarded to the upstream LLM contains a canary token in the
         system prompt, but the original request (without the canary) is in
         the audit log.
@@ -435,7 +435,7 @@ class TestCanaryInjection:
                     {"role": "user", "content": "Tell me a joke."},
                 ],
             },
-            headers={**_HEADERS, "x-abb-session-id": f"sess-canary-{uuid.uuid4().hex[:8]}"},
+            headers={**_HEADERS, "x-aegivis-session-id": f"sess-canary-{uuid.uuid4().hex[:8]}"},
         )
         assert resp.status_code == 200
         assert len(captured_bodies) == 1
@@ -446,7 +446,7 @@ class TestCanaryInjection:
             str(m.get("content") or "")
             for m in forwarded.get("messages", [])
         )
-        assert "ABB_CVT_" in all_content, (
+        assert "AEGIVIS_CVT_" in all_content, (
             f"Canary token not found in forwarded messages. Content: {all_content[:500]}"
         )
 
@@ -473,7 +473,7 @@ class TestCanaryInjection:
                 "model": "gpt-4o",
                 "messages": [{"role": "user", "content": original_user_content}],
             },
-            headers={**_HEADERS, "x-abb-session-id": f"sess-nocnry-{uuid.uuid4().hex[:8]}"},
+            headers={**_HEADERS, "x-aegivis-session-id": f"sess-nocnry-{uuid.uuid4().hex[:8]}"},
         )
         assert resp.status_code == 200
 
@@ -488,7 +488,7 @@ class TestCanaryInjection:
         messages = start["payload"]["messages"]
         all_content = " ".join(str(m.get("content") or "") for m in messages)
         # Canary must NOT be in the audit log
-        assert "ABB_CVT_" not in all_content, (
+        assert "AEGIVIS_CVT_" not in all_content, (
             "Canary token leaked into audit log!"
         )
         # Original content must be preserved
@@ -533,7 +533,7 @@ class TestSpotlighting:
                     {"role": "user", "content": "Thanks!"},
                 ],
             },
-            headers={**_HEADERS, "x-abb-session-id": f"sess-spotlight-{uuid.uuid4().hex[:8]}"},
+            headers={**_HEADERS, "x-aegivis-session-id": f"sess-spotlight-{uuid.uuid4().hex[:8]}"},
         )
         assert resp.status_code == 200
         assert len(captured_bodies) == 1
@@ -593,7 +593,7 @@ class TestToolCallHandling:
         resp = proxy_app.post(
             "/openai/v1/chat/completions",
             json=_CHAT_REQUEST,
-            headers={**_HEADERS, "x-abb-session-id": f"sess-tool-{uuid.uuid4().hex[:8]}"},
+            headers={**_HEADERS, "x-aegivis-session-id": f"sess-tool-{uuid.uuid4().hex[:8]}"},
         )
         assert resp.status_code == 200
 
@@ -626,7 +626,7 @@ class TestToolCallHandling:
         resp = proxy_app.post(
             "/openai/v1/chat/completions",
             json=_CHAT_REQUEST,
-            headers={**_HEADERS, "x-abb-session-id": f"sess-finish-{uuid.uuid4().hex[:8]}"},
+            headers={**_HEADERS, "x-aegivis-session-id": f"sess-finish-{uuid.uuid4().hex[:8]}"},
         )
         assert resp.status_code == 200
 
@@ -659,7 +659,7 @@ class TestErrorHandling:
         resp = proxy_app.post(
             "/openai/v1/chat/completions",
             json=_CHAT_REQUEST,
-            headers={**_HEADERS, "x-abb-session-id": f"sess-err-{uuid.uuid4().hex[:8]}"},
+            headers={**_HEADERS, "x-aegivis-session-id": f"sess-err-{uuid.uuid4().hex[:8]}"},
         )
         # The proxy forwards the upstream error response to the client
         assert resp.status_code == 500
@@ -687,7 +687,7 @@ class TestErrorHandling:
             headers={
                 "Content-Type": "application/json",
                 "Authorization": "Bearer sk-test",
-                "x-abb-agent-id": "test-agent",
+                "x-aegivis-agent-id": "test-agent",
             },
         )
         # Proxy parses body as {} and forwards — upstream still responds 200
@@ -707,7 +707,7 @@ class TestSessionStatePersistence:
         """
         mock_transport.enqueue.reset_mock()
         session_id = f"sess-seq-{uuid.uuid4().hex[:8]}"
-        headers = {**_HEADERS, "x-abb-session-id": session_id}
+        headers = {**_HEADERS, "x-aegivis-session-id": session_id}
 
         for _ in range(3):
             respx.post(_OPENAI_CHAT_URL).mock(
@@ -743,7 +743,7 @@ class TestSessionStatePersistence:
         """
         mock_transport.enqueue.reset_mock()
         session_id = f"sess-chain-{uuid.uuid4().hex[:8]}"
-        headers = {**_HEADERS, "x-abb-session-id": session_id}
+        headers = {**_HEADERS, "x-aegivis-session-id": session_id}
 
         for _ in range(2):
             respx.post(_OPENAI_CHAT_URL).mock(

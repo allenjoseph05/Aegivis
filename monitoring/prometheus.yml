@@ -2,14 +2,24 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Alerting rules — evaluated every 15s
+rule_files:
+  - "prometheus.rules.yml"
+
+# AlertManager integration (optional — uncomment and set URL to enable)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ["alertmanager:9093"]
+
 scrape_configs:
-  - job_name: "agentblackbox-proxy"
+  - job_name: "aegivis-proxy"
     static_configs:
       - targets: ["proxy:8080"]
     metrics_path: /metrics
     scrape_interval: 10s
 
-  - job_name: "agentblackbox-backend"
+  - job_name: "aegivis-backend"
     static_configs:
       - targets: ["backend:8000"]
     metrics_path: /metrics

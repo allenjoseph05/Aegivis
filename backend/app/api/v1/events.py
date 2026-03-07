@@ -35,11 +35,8 @@ async def get_events(
         org_id=org_ctx.org_id,
         limit=limit,
         offset=offset,
+        event_type=event_type,
     )
-
-    # Apply event_type filter client-side (simple for Phase 1)
-    if event_type:
-        events = [e for e in events if e.get("event_type") == event_type]
 
     return {
         "session_id": session_id,

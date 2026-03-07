@@ -1,5 +1,5 @@
 /**
- * Vitest configuration for the AgentBlackBox dashboard.
+ * Vitest configuration for the Aegivis dashboard.
  *
  * Merges with the existing Vite config so plugins (react, path aliases, etc.)
  * are automatically available in tests.
