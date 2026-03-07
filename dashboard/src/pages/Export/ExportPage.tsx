@@ -7,7 +7,7 @@
 import { useState } from "react";
 import { ExportPanel } from "./ExportPanel";
 import type { ExportTarget, PushResult } from "./export.types";
-import { pushToSplunk, pushToElasticsearch } from "../../api/client";
+import { pushToSplunk, pushToElasticsearch, BASE_URL, API_KEY } from "../../api/client";
 import { AuditReportPanel } from "./AuditReportPanel";
 import styles from "./ExportPage.module.css";
 
@@ -52,14 +52,14 @@ const SPLUNK_FIELDS = [
   {
     key: "index",
     label: "Splunk Index",
-    placeholder: "agentblackbox",
-    defaultValue: "agentblackbox",
+    placeholder: "aegivis",
+    defaultValue: "aegivis",
   },
   {
     key: "source",
     label: "Source",
-    placeholder: "agentblackbox-proxy",
-    defaultValue: "agentblackbox-proxy",
+    placeholder: "aegivis-proxy",
+    defaultValue: "aegivis-proxy",
   },
 ];
 
@@ -80,8 +80,8 @@ const ELASTIC_FIELDS = [
   {
     key: "index",
     label: "Index Name",
-    placeholder: "agentblackbox",
-    defaultValue: "agentblackbox",
+    placeholder: "aegivis",
+    defaultValue: "aegivis",
   },
 ];
 
@@ -92,8 +92,8 @@ function JsonLinesTab() {
   const [agentId, setAgentId] = useState("");
   const [limit, setLimit] = useState("10000");
 
-  const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) || "";
-  const apiKey = (import.meta.env.VITE_API_KEY as string) || "dev-dashboard-key";
+  const backendUrl = BASE_URL;
+  const apiKey = API_KEY;
 
   const params = new URLSearchParams();
   if (sessionId) params.set("session_id", sessionId);
@@ -105,7 +105,7 @@ function JsonLinesTab() {
   const curlCmd =
     `curl -H "X-API-Key: ${apiKey}" \\\n` +
     `     "${downloadUrl}" \\\n` +
-    `     > agentblackbox-events.ndjson`;
+    `     > aegivis-events.ndjson`;
 
   return (
     <div className={styles.jsonLinesPanel}>
@@ -158,7 +158,7 @@ function JsonLinesTab() {
       {/* Direct download link */}
       <a
         href={downloadUrl}
-        download="agentblackbox-events.ndjson"
+        download="aegivis-events.ndjson"
         className={styles.downloadBtn}
         aria-label="Download events as NDJSON file"
       >
@@ -172,8 +172,8 @@ function JsonLinesTab() {
 
 function SplunkTab() {
   const [values, setValues] = useState<Record<string, string>>({
-    index: "agentblackbox",
-    source: "agentblackbox-proxy",
+    index: "aegivis",
+    source: "aegivis-proxy",
     limit: "5000",
   });
   const [isLoading, setIsLoading] = useState(false);
@@ -188,8 +188,8 @@ function SplunkTab() {
       const res = await pushToSplunk({
         hec_url: values.hec_url ?? "",
         hec_token: values.hec_token ?? "",
-        index: values.index || "agentblackbox",
-        source: values.source || "agentblackbox-proxy",
+        index: values.index || "aegivis",
+        source: values.source || "aegivis-proxy",
         session_id: values.session_id || undefined,
         agent_id: values.agent_id || undefined,
         limit: values.limit ? parseInt(values.limit, 10) : 5000,
@@ -224,7 +224,7 @@ function SplunkTab() {
 
 function ElasticsearchTab() {
   const [values, setValues] = useState<Record<string, string>>({
-    index: "agentblackbox",
+    index: "aegivis",
     limit: "5000",
   });
   const [isLoading, setIsLoading] = useState(false);
@@ -239,7 +239,7 @@ function ElasticsearchTab() {
       const res = await pushToElasticsearch({
         es_url: values.es_url ?? "",
         api_key: values.api_key || undefined,
-        index: values.index || "agentblackbox",
+        index: values.index || "aegivis",
         session_id: values.session_id || undefined,
         agent_id: values.agent_id || undefined,
         limit: values.limit ? parseInt(values.limit, 10) : 5000,

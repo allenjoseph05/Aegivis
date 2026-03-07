@@ -76,7 +76,7 @@ function PostureScoreRing({ score }: { score: number }) {
 // ─── Agent status ──────────────────────────────────────────────────────────────
 
 function agentStatus(
-  agent: Agent,
+  _agent: Agent,
   metrics: AgentMetrics | undefined,
   recentBlocks: number
 ): { label: string; color: string; dot: string } {
@@ -111,6 +111,20 @@ function ActionBadge({ action }: { action: string }) {
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-amber-100 text-amber-700">
       <AlertTriangle size={11} /> ALERT
     </span>
+  );
+}
+
+// ─── Stat card skeleton ────────────────────────────────────────────────────────
+
+function StatCardSkeleton() {
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-center gap-4 shadow-sm animate-pulse">
+      <div className="p-2.5 rounded-lg bg-gray-100 w-10 h-10 flex-shrink-0" />
+      <div className="space-y-2">
+        <div className="h-7 bg-gray-200 rounded w-12" />
+        <div className="h-3.5 bg-gray-100 rounded w-20" />
+      </div>
+    </div>
   );
 }
 
@@ -211,7 +225,7 @@ function AgentCard({
 // ─── Main page ─────────────────────────────────────────────────────────────────
 
 export function OverviewPage() {
-  const { data: metrics } = useQuery({
+  const { data: metrics, isLoading: metricsLoading } = useQuery({
     queryKey: ["metrics-overview"],
     queryFn: getMetricsOverview,
     refetchInterval: 15_000,
@@ -284,7 +298,7 @@ export function OverviewPage() {
           <div className="text-center space-y-1">
             {totalPending > 0 && (
               <Link
-                to="/baselines"
+                to="/agents"
                 className="text-xs text-amber-600 hover:text-amber-700 flex items-center justify-center gap-1"
               >
                 <Bell size={11} />
@@ -305,30 +319,41 @@ export function OverviewPage() {
 
         {/* Quick stats */}
         <div className="lg:col-span-3 grid grid-cols-2 gap-4">
-          <StatCard
-            icon={Users}
-            label="Active agents"
-            value={agents.length}
-            accent="bg-blue-50"
-          />
-          <StatCard
-            icon={Activity}
-            label="Total sessions"
-            value={metrics?.session_count ?? 0}
-            accent="bg-purple-50"
-          />
-          <StatCard
-            icon={XCircle}
-            label="Blocked requests"
-            value={metrics?.blocked_count ?? 0}
-            accent={metrics?.blocked_count ? "bg-red-50" : "bg-gray-50"}
-          />
-          <StatCard
-            icon={AlertTriangle}
-            label="Alerts today"
-            value={metrics?.alert_count ?? 0}
-            accent={metrics?.alert_count ? "bg-amber-50" : "bg-gray-50"}
-          />
+          {metricsLoading && !metrics ? (
+            <>
+              <StatCardSkeleton />
+              <StatCardSkeleton />
+              <StatCardSkeleton />
+              <StatCardSkeleton />
+            </>
+          ) : (
+            <>
+              <StatCard
+                icon={Users}
+                label="Active agents"
+                value={agents.length}
+                accent="bg-blue-50"
+              />
+              <StatCard
+                icon={Activity}
+                label="Total sessions"
+                value={metrics?.session_count ?? 0}
+                accent="bg-purple-50"
+              />
+              <StatCard
+                icon={XCircle}
+                label="Blocked requests"
+                value={metrics?.blocked_count ?? 0}
+                accent={metrics?.blocked_count ? "bg-red-50" : "bg-gray-50"}
+              />
+              <StatCard
+                icon={AlertTriangle}
+                label="Alerts today"
+                value={metrics?.alert_count ?? 0}
+                accent={metrics?.alert_count ? "bg-amber-50" : "bg-gray-50"}
+              />
+            </>
+          )}
         </div>
       </div>
 
@@ -405,15 +430,15 @@ export function OverviewPage() {
               icon={Shield}
               label="Review pending tools"
               sub={totalPending > 0 ? `${totalPending} awaiting review` : "All clear"}
-              to="/baselines"
+              to="/agents"
               badge={totalPending > 0 ? totalPending : undefined}
               urgent={totalPending > 0}
             />
             <QuickAction
               icon={Activity}
-              label="View all events"
+              label="View all sessions"
               sub="Full session audit trail"
-              to="/events"
+              to="/sessions"
             />
             <QuickAction
               icon={TrendingUp}

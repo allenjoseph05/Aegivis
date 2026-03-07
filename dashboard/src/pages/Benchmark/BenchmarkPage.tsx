@@ -21,6 +21,8 @@ import {
   Lock,
   ChevronLeft,
   ChevronRight,
+  Settings,
+  ChevronDown,
 } from "lucide-react";
 
 import {
@@ -30,7 +32,12 @@ import {
   fetchLastExternalBenchmark,
   PROXY_URL,
 } from "../../api/client";
-import type { BenchmarkReport, CaseResult, CategorySummary } from "../../api/client";
+import type {
+  BenchmarkReport,
+  BenchmarkRunOptions,
+  CaseResult,
+  CategorySummary,
+} from "../../api/client";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -630,7 +637,7 @@ const LAYER_DEFS: Array<{
     description: "Cosine similarity to 180-sentence attack vector library. Catches paraphrased variants.",
     alwaysActive: false,
     installHint: "Requires sentence-transformers",
-    installCmd: "pip install 'agentblackbox-proxy[security]'",
+    installCmd: "pip install 'aegivis-proxy[security]'",
   },
   {
     id: "coherence",
@@ -638,7 +645,7 @@ const LAYER_DEFS: Array<{
     description: "Measures semantic drift from original task intent. Catches goal-hijacking in multi-turn sessions.",
     alwaysActive: false,
     installHint: "Requires sentence-transformers (same as Layer 2)",
-    installCmd: "pip install 'agentblackbox-proxy[security]'",
+    installCmd: "pip install 'aegivis-proxy[security]'",
   },
   {
     id: "classifier",
@@ -646,7 +653,7 @@ const LAYER_DEFS: Array<{
     description: "DeBERTa fine-tuned on 30k+ real attacks. 88-99% PINT benchmark accuracy.",
     alwaysActive: false,
     installHint: "Requires transformers + torch (~280 MB)",
-    installCmd: "pip install 'agentblackbox-proxy[classifier]'",
+    installCmd: "pip install 'aegivis-proxy[classifier]'",
   },
 ];
 
@@ -748,8 +755,12 @@ function ReportDisplay({
       </div>
 
       {/* Benchmark rigor cards (only shown for internal benchmark with rigor data) */}
-      {!isExternal && (report.contamination_pct !== undefined || report.paraphrase_tpr !== undefined) && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      {!isExternal && (
+        report.contamination_pct !== undefined ||
+        report.paraphrase_tpr !== undefined ||
+        report.long_context_tpr !== undefined
+      ) && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           {report.contamination_pct !== undefined && (
             <MetricCard
               title="Self-Test Bias"
@@ -762,8 +773,16 @@ function ReportDisplay({
             <MetricCard
               title="Paraphrase TPR"
               value={fmtPct(report.paraphrase_tpr)}
-              subtitle={`${report.paraphrase_detected ?? 0} of ${report.paraphrase_count ?? 0} paraphrase attacks caught (no phrase overlap)`}
+              subtitle={`${report.paraphrase_detected ?? 0} / ${report.paraphrase_count ?? 0} paraphrase attacks caught`}
               color={(report.paraphrase_tpr ?? 0) >= 0.5 ? "green" : (report.paraphrase_tpr ?? 0) >= 0.25 ? "yellow" : "red"}
+            />
+          )}
+          {report.long_context_tpr !== undefined && (
+            <MetricCard
+              title="Long-Context TPR"
+              value={fmtPct(report.long_context_tpr)}
+              subtitle={`${report.long_context_detected ?? 0} / ${report.long_context_count ?? 0} padding-evasion attacks caught — needs WalledGuard 8k`}
+              color={(report.long_context_tpr ?? 0) >= 0.8 ? "green" : (report.long_context_tpr ?? 0) >= 0.4 ? "yellow" : "red"}
             />
           )}
         </div>
@@ -790,6 +809,134 @@ function ReportDisplay({
 }
 
 // ---------------------------------------------------------------------------
+// Layer settings panel
+// ---------------------------------------------------------------------------
+
+interface LayerSettings {
+  useClassifier: boolean;
+}
+
+const DEFAULT_SETTINGS: LayerSettings = { useClassifier: false };
+
+const LAYER_SETTINGS_INFO = [
+  {
+    id: "normalizer" as const,
+    label: "Layer 0 — Normalizer",
+    description: "Decodes Base64, Hex, ROT13, URL-encoded obfuscation before scanning.",
+    impact: null,
+    alwaysOn: true,
+  },
+  {
+    id: "structural" as const,
+    label: "Layer 1 — Structural",
+    description: "Detects LLM token delimiters (e.g. <|im_start|>, [INST]) and RTL Unicode overrides.",
+    impact: null,
+    alwaysOn: true,
+  },
+  {
+    id: "classifier" as const,
+    label: "Layer 4 — DeBERTa Classifier",
+    description:
+      "Fine-tuned on 30k+ real injection attacks. Catches paraphrased and obfuscated variants the structural layer misses. Adds ~50ms per case.",
+    impactLabel: "+15–30% TPR on paraphrase attacks",
+    alwaysOn: false,
+    settingKey: "useClassifier" as keyof LayerSettings,
+  },
+];
+
+function SettingsPanel({
+  settings,
+  onChange,
+}: {
+  settings: LayerSettings;
+  onChange: (s: LayerSettings) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between px-5 py-3.5 hover:bg-gray-50 transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <Settings size={15} className="text-gray-500" />
+          <span className="text-sm font-semibold text-gray-800">Layer Settings</span>
+          {settings.useClassifier && (
+            <span className="text-[10px] bg-blue-100 text-blue-700 font-semibold px-2 py-0.5 rounded-full">
+              DeBERTa ON
+            </span>
+          )}
+        </div>
+        <ChevronDown
+          size={15}
+          className={clsx(
+            "text-gray-400 transition-transform",
+            open ? "rotate-180" : ""
+          )}
+        />
+      </button>
+
+      {open && (
+        <div className="border-t px-5 py-4 space-y-4">
+          <p className="text-xs text-gray-500">
+            Choose which detection layers are active during the benchmark run. Disabling slower
+            layers lets you isolate and compare their individual contribution to TPR and FPR.
+          </p>
+          {LAYER_SETTINGS_INFO.map((layer) => (
+            <div key={layer.id} className="flex items-start gap-3">
+              {layer.alwaysOn ? (
+                <span className="mt-0.5 w-9 text-center">
+                  <span className="inline-block w-5 h-5 rounded bg-green-100 border border-green-300 flex items-center justify-center">
+                    <CheckCircle2 size={11} className="text-green-600" />
+                  </span>
+                </span>
+              ) : (
+                <input
+                  type="checkbox"
+                  id={`layer-${layer.id}`}
+                  className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                  checked={settings[layer.settingKey!] ?? false}
+                  onChange={(e) =>
+                    onChange({ ...settings, [layer.settingKey!]: e.target.checked })
+                  }
+                />
+              )}
+              <label
+                htmlFor={layer.alwaysOn ? undefined : `layer-${layer.id}`}
+                className={clsx("flex-1 cursor-pointer", layer.alwaysOn && "cursor-default")}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-gray-800">{layer.label}</span>
+                  {layer.alwaysOn && (
+                    <span className="text-[10px] bg-gray-100 text-gray-500 font-medium px-1.5 py-0.5 rounded">
+                      always on
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-gray-500 mt-0.5">{layer.description}</p>
+                {"impactLabel" in layer && layer.impactLabel && (
+                  <p className="text-xs text-blue-600 font-medium mt-0.5">
+                    Expected impact: {layer.impactLabel}
+                  </p>
+                )}
+              </label>
+            </div>
+          ))}
+          <div className="pt-2 border-t">
+            <p className="text-xs text-gray-400">
+              Layers 2 (Semantic) and 3 (Coherence) require{" "}
+              <code className="bg-gray-100 px-1 rounded">pip install aegivis-proxy[security]</code>{" "}
+              and are not yet exposed as benchmark toggles.
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
 
@@ -797,6 +944,7 @@ type BenchmarkMode = "internal" | "external";
 
 export function BenchmarkPage() {
   const [mode, setMode] = useState<BenchmarkMode>("internal");
+  const [layerSettings, setLayerSettings] = useState<LayerSettings>(DEFAULT_SETTINGS);
 
   // Internal benchmark state
   const [internalReport, setInternalReport] = useState<BenchmarkReport | null>(null);
@@ -844,11 +992,15 @@ export function BenchmarkPage() {
       .finally(() => setExternalLoading(false));
   }, []);
 
+  const benchmarkOpts: BenchmarkRunOptions = {
+    useClassifier: layerSettings.useClassifier,
+  };
+
   async function handleRunInternal() {
     setInternalRunning(true);
     setInternalError(null);
     try {
-      const data = await runBenchmark();
+      const data = await runBenchmark(benchmarkOpts);
       setInternalReport(data);
     } catch (err) {
       setInternalError(
@@ -865,7 +1017,7 @@ export function BenchmarkPage() {
     setExternalRunning(true);
     setExternalError(null);
     try {
-      const data = await runExternalBenchmark();
+      const data = await runExternalBenchmark(benchmarkOpts);
       setExternalReport(data);
     } catch (err) {
       setExternalError(
@@ -898,9 +1050,12 @@ export function BenchmarkPage() {
             <p className="text-xs text-gray-400 mt-0.5">
               Last run{" "}
               {formatDistanceToNow(new Date(report.run_at), { addSuffix: true })}
-              {" -- "}
+              {" — "}
               {report.duration_s.toFixed(1)}s total &bull;{" "}
-              {report.total_attacks} attacks + {report.total_clean} clean
+              {report.total_attacks} core attacks + {report.total_clean} clean
+              {(report.long_context_count ?? 0) > 0 && (
+                <> + {report.long_context_count} long-context (held-out)</>
+              )}
             </p>
           )}
         </div>
@@ -915,15 +1070,9 @@ export function BenchmarkPage() {
           )}
         >
           {running ? (
-            <>
-              <Loader2 size={15} className="animate-spin" />
-              Running...
-            </>
+            <><Loader2 size={15} className="animate-spin" />Running...</>
           ) : (
-            <>
-              <Play size={15} />
-              Run Benchmark
-            </>
+            <><Play size={15} />Run Benchmark</>
           )}
         </button>
       </div>
@@ -956,67 +1105,73 @@ export function BenchmarkPage() {
         </button>
       </div>
 
-      {/* External dataset info */}
-      {mode === "external" && !externalReport && !externalLoading && !externalError && (
-        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 text-sm text-blue-700 space-y-1">
-          <p className="font-semibold">Real-World Dataset Benchmark</p>
-          <p className="text-xs text-blue-600">
-            Tests the scanner against 10 HuggingFace datasets covering direct injection,
-            jailbreaks, in-the-wild attacks, HackAPrompt competition prompts, and adversarial
-            machine-generated attacks. Benign FPR stress-tested against Alpaca + ChatGPT prompts.
-          </p>
-          <p className="text-xs text-blue-500">
-            Requires: <code className="bg-blue-100 px-1 rounded">pip install datasets</code> on the proxy.
-            First run downloads datasets (~100-500 MB, cached after).
-          </p>
-        </div>
-      )}
+      {/* Layer settings */}
+      <SettingsPanel settings={layerSettings} onChange={setLayerSettings} />
 
-      {/* Error banner */}
-      {error && (
-        <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">
-          <XCircle size={16} className="mt-0.5 shrink-0" />
-          <span>{error}</span>
-        </div>
-      )}
-
-      {/* No-data info banner */}
-      {!loading && !error && !report && (
-        <div className="flex items-start gap-2 bg-gray-50 border border-gray-200 text-gray-600 rounded-lg px-4 py-3 text-sm">
-          <Info size={16} className="mt-0.5 shrink-0 text-gray-400" />
-          {isInternal ? (
-            <span>
-              No benchmark run yet. Click{" "}
-              <span className="font-semibold text-gray-800">Run Benchmark</span> to
-              evaluate scanner effectiveness against 145 known attacks and 60 clean
-              messages. Takes 1-30s depending on active layers.
-            </span>
-          ) : (
-            <span>
-              No external benchmark run yet. Click{" "}
-              <span className="font-semibold text-gray-800">Run Benchmark</span> to
-              test against real-world HuggingFace datasets. Requires{" "}
-              <code className="bg-gray-100 px-1 rounded text-xs">pip install datasets</code>.
-              First run may take several minutes to download datasets.
-            </span>
+      {/* Internal / External content */}
+      <>
+        {/* External dataset info */}
+        {mode === "external" && !externalReport && !externalLoading && !externalError && (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 text-sm text-blue-700 space-y-1">
+              <p className="font-semibold">Real-World Dataset Benchmark</p>
+              <p className="text-xs text-blue-600">
+                Tests the scanner against 10 HuggingFace datasets covering direct injection,
+                jailbreaks, in-the-wild attacks, HackAPrompt competition prompts, and adversarial
+                machine-generated attacks. Benign FPR stress-tested against Alpaca + ChatGPT prompts.
+              </p>
+              <p className="text-xs text-blue-500">
+                Requires: <code className="bg-blue-100 px-1 rounded">pip install datasets</code> on the proxy.
+                First run downloads datasets (~100-500 MB, cached after).
+              </p>
+            </div>
           )}
-        </div>
-      )}
 
-      {/* Loading state */}
-      {loading && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <SkeletonCard />
-          <SkeletonCard />
-          <SkeletonCard />
-          <SkeletonCard />
-        </div>
-      )}
+          {/* Error banner */}
+          {error && (
+            <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">
+              <XCircle size={16} className="mt-0.5 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
 
-      {/* Results */}
-      {!loading && report && (
-        <ReportDisplay report={report} isExternal={!isInternal} />
-      )}
+          {/* No-data info banner */}
+          {!loading && !error && !report && (
+            <div className="flex items-start gap-2 bg-gray-50 border border-gray-200 text-gray-600 rounded-lg px-4 py-3 text-sm">
+              <Info size={16} className="mt-0.5 shrink-0 text-gray-400" />
+              {isInternal ? (
+                <span>
+                  No benchmark run yet. Click{" "}
+                  <span className="font-semibold text-gray-800">Run Benchmark</span> to
+                  evaluate scanner effectiveness against 145 known attacks and 60 clean
+                  messages. Takes 1-30s depending on active layers.
+                </span>
+              ) : (
+                <span>
+                  No external benchmark run yet. Click{" "}
+                  <span className="font-semibold text-gray-800">Run Benchmark</span> to
+                  test against real-world HuggingFace datasets. Requires{" "}
+                  <code className="bg-gray-100 px-1 rounded text-xs">pip install datasets</code>.
+                  First run may take several minutes to download datasets.
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Loading state */}
+          {loading && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <SkeletonCard />
+              <SkeletonCard />
+              <SkeletonCard />
+              <SkeletonCard />
+            </div>
+          )}
+
+          {/* Results */}
+          {!loading && report && (
+            <ReportDisplay report={report} isExternal={!isInternal} />
+          )}
+        </>
     </div>
   );
 }
