@@ -80,6 +80,14 @@ docker-compose.override.yml
 docker-compose.local.yml
 
 # -----------------------------------------------------------------------------
+# Enterprise — excluded from the public community repository
+# The enterprise/ folder contains proprietary code and is kept in a private
+# repository. Developers with enterprise access work in a monorepo and have
+# this folder present locally; it is never pushed to the public remote.
+# -----------------------------------------------------------------------------
+enterprise/
+
+# -----------------------------------------------------------------------------
 # Database / data
 # -----------------------------------------------------------------------------
 *.db
@@ -90,6 +98,7 @@ postgres_data/
 # Runtime data files (generated at runtime, should not be committed)
 # -----------------------------------------------------------------------------
 proxy/abb_sessions.json
+proxy/aegivis_sessions.json
 proxy/tests/external_dataset_results.json
 
 # -----------------------------------------------------------------------------

@@ -5,7 +5,7 @@
     {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"}
   ],
   "annotations": {"list": []},
-  "description": "AgentBlackBox — AI Agent Security and Observability",
+  "description": "Aegivis — AI Agent Security and Observability",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -20,7 +20,7 @@
       "targets": [
         {
           "datasource": "Prometheus",
-          "expr": "rate(abb_requests_total[1m])",
+          "expr": "rate(aegivis_requests_total[1m])",
           "legendFormat": "{{provider}} {{status}}",
           "refId": "A"
         }
@@ -38,7 +38,7 @@
       "targets": [
         {
           "datasource": "Prometheus",
-          "expr": "rate(abb_violations_total{action='BLOCK'}[1m])",
+          "expr": "rate(aegivis_violations_total{action='BLOCK'}[1m])",
           "legendFormat": "{{rule_name}}",
           "refId": "A"
         }
@@ -56,7 +56,7 @@
       "targets": [
         {
           "datasource": "Prometheus",
-          "expr": "abb_active_sessions",
+          "expr": "aegivis_active_sessions",
           "legendFormat": "Sessions",
           "refId": "A"
         }
@@ -82,19 +82,19 @@
       "targets": [
         {
           "datasource": "Prometheus",
-          "expr": "histogram_quantile(0.50, rate(abb_llm_latency_ms_bucket[5m]))",
+          "expr": "histogram_quantile(0.50, rate(aegivis_llm_latency_ms_bucket[5m]))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": "Prometheus",
-          "expr": "histogram_quantile(0.95, rate(abb_llm_latency_ms_bucket[5m]))",
+          "expr": "histogram_quantile(0.95, rate(aegivis_llm_latency_ms_bucket[5m]))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": "Prometheus",
-          "expr": "histogram_quantile(0.99, rate(abb_llm_latency_ms_bucket[5m]))",
+          "expr": "histogram_quantile(0.99, rate(aegivis_llm_latency_ms_bucket[5m]))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -112,7 +112,7 @@
       "targets": [
         {
           "datasource": "Prometheus",
-          "expr": "sort_desc(sum by (rule_name, action) (increase(abb_violations_total[1h])))",
+          "expr": "sort_desc(sum by (rule_name, action) (increase(aegivis_violations_total[1h])))",
           "legendFormat": "{{rule_name}} / {{action}}",
           "refId": "A",
           "instant": true
@@ -129,7 +129,7 @@
       "targets": [
         {
           "datasource": "Prometheus",
-          "expr": "histogram_quantile(0.95, rate(abb_security_scan_duration_ms_bucket[5m]))",
+          "expr": "histogram_quantile(0.95, rate(aegivis_security_scan_duration_ms_bucket[5m]))",
           "legendFormat": "p95 {{scanner}}",
           "refId": "A"
         }
@@ -144,7 +144,7 @@
       "targets": [
         {
           "datasource": "Prometheus",
-          "expr": "rate(abb_events_ingested_total[1m])",
+          "expr": "rate(aegivis_events_ingested_total[1m])",
           "legendFormat": "{{event_type}}",
           "refId": "A"
         }
@@ -159,7 +159,7 @@
       "targets": [
         {
           "datasource": "Prometheus",
-          "expr": "rate(abb_anomalies_detected_total[1m]) * 60",
+          "expr": "rate(aegivis_anomalies_detected_total[1m]) * 60",
           "legendFormat": "{{rule_id}} {{severity}}",
           "refId": "A"
         }
@@ -177,22 +177,76 @@
       "targets": [
         {
           "datasource": "Prometheus",
-          "expr": "rate(abb_security_scans_total[1m])",
+          "expr": "rate(aegivis_security_scans_total[1m])",
           "legendFormat": "{{scanner}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    },
+    {
+      "id": 10,
+      "title": "Injection Violations / sec (Alert + Block)",
+      "description": "Rate of prompt-injection-alert and prompt-injection-block violations. High rate indicates active injection attempts. Use as a proxy for injection score distribution until aegivis_injection_score histogram is exported.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "rate(aegivis_violations_total{rule_name=~\"prompt-injection.*\"}[1m])",
+          "legendFormat": "{{rule_name}} / {{action}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byFrameRefID", "options": "A"},
+            "properties": [{"id": "custom.fillOpacity", "value": 15}]
+          }
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "title": "Event Queue Throughput / sec",
+      "description": "Rate of events enqueued by type. Use as a proxy for backend queue depth — sustained high rate with no backend processing indicates queue buildup. For actual Redis queue depth, deploy redis_exporter alongside Redis.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sum by (event_type) (rate(aegivis_events_enqueued_total[1m]))",
+          "legendFormat": "{{event_type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "wps",
+          "color": {"mode": "palette-classic"},
+          "custom": {"fillOpacity": 8}
+        },
+        "overrides": []
+      }
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
-  "tags": ["agentblackbox", "ai-security", "observability"],
+  "tags": ["aegivis", "ai-security", "observability"],
   "templating": {"list": []},
   "time": {"from": "now-1h", "to": "now"},
   "timepicker": {},
   "timezone": "browser",
-  "title": "AgentBlackBox — AI Security & Observability",
-  "uid": "agentblackbox-main",
+  "title": "Aegivis — AI Security & Observability",
+  "uid": "aegivis-main",
   "version": 1
 }

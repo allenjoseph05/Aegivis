@@ -1,22 +1,22 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ include "agentblackbox.fullname" . }}-postgres
+  name: {{ include "aegivis.fullname" . }}-postgres
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "agentblackbox.labels" . | nindent 4 }}
+    {{- include "aegivis.labels" . | nindent 4 }}
     app.kubernetes.io/component: postgres
 spec:
-  serviceName: {{ include "agentblackbox.fullname" . }}-postgres
+  serviceName: {{ include "aegivis.fullname" . }}-postgres
   replicas: 1
   selector:
     matchLabels:
-      {{- include "agentblackbox.selectorLabels" . | nindent 6 }}
+      {{- include "aegivis.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: postgres
   template:
     metadata:
       labels:
-        {{- include "agentblackbox.selectorLabels" . | nindent 8 }}
+        {{- include "aegivis.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: postgres
     spec:
       containers:

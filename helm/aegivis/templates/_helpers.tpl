@@ -1,14 +1,14 @@
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "agentblackbox.name" -}}
+{{- define "aegivis.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Create a default fully qualified app name.
 */}}
-{{- define "agentblackbox.fullname" -}}
+{{- define "aegivis.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -24,16 +24,16 @@ Create a default fully qualified app name.
 {{/*
 Create chart label.
 */}}
-{{- define "agentblackbox.chart" -}}
+{{- define "aegivis.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Common labels.
 */}}
-{{- define "agentblackbox.labels" -}}
-helm.sh/chart: {{ include "agentblackbox.chart" . }}
-app.kubernetes.io/name: {{ include "agentblackbox.name" . }}
+{{- define "aegivis.labels" -}}
+helm.sh/chart: {{ include "aegivis.chart" . }}
+app.kubernetes.io/name: {{ include "aegivis.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
@@ -44,14 +44,14 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/*
 Selector labels.
 */}}
-{{- define "agentblackbox.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "agentblackbox.name" . }}
+{{- define "aegivis.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "aegivis.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
 Database URL helper.
 */}}
-{{- define "agentblackbox.databaseUrl" -}}
-{{- printf "postgresql+asyncpg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@%s-postgres:%d/agentblackbox" (include "agentblackbox.fullname" .) (.Values.postgres.service.port | int) }}
+{{- define "aegivis.databaseUrl" -}}
+{{- printf "postgresql+asyncpg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@%s-postgres:%d/aegivis" (include "aegivis.fullname" .) (.Values.postgres.service.port | int) }}
 {{- end }}

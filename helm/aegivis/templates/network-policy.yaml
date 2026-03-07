@@ -1,0 +1,149 @@
+{{- if .Values.networkPolicy.enabled }}
+# Aegivis NetworkPolicy — restricts pod-to-pod traffic to least-privilege paths:
+#   proxy    → backend (8000), LLM providers (egress: any port 443)
+#   backend  → postgres (5432), redis (6379)
+#   dashboard → backend (8000)
+#   All pods → kube-dns (UDP 53) for name resolution
+
+# ── Proxy ──────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "aegivis.fullname" . }}-proxy
+  labels:
+    {{- include "aegivis.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: proxy
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Accept agent traffic on port 8080 from any source
+    - ports:
+        - protocol: TCP
+          port: 8080
+    # Accept Prometheus scraping
+    - ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # Reach backend API
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: backend
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Reach Redis (for session state + streams)
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    # Reach LLM providers (Anthropic, OpenAI, etc.) on HTTPS
+    - ports:
+        - protocol: TCP
+          port: 443
+    # DNS resolution
+    - ports:
+        - protocol: UDP
+          port: 53
+---
+# ── Backend ────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "aegivis.fullname" . }}-backend
+  labels:
+    {{- include "aegivis.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: backend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Accept from proxy and dashboard on port 8000
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: proxy
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: dashboard
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Accept Prometheus scraping
+    - ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    # Reach postgres
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Reach Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    # Outbound notifications (SMTP, Slack, PagerDuty, webhooks)
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 587   # SMTP submission
+        - protocol: TCP
+          port: 465   # SMTP over TLS
+    # DNS resolution
+    - ports:
+        - protocol: UDP
+          port: 53
+---
+# ── Dashboard ──────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "aegivis.fullname" . }}-dashboard
+  labels:
+    {{- include "aegivis.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: dashboard
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Accept browser traffic on port 80
+    - ports:
+        - protocol: TCP
+          port: 80
+  egress:
+    # Reach backend API (for SSR / healthcheck probes — nginx proxies to backend)
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: backend
+      ports:
+        - protocol: TCP
+          port: 8000
+    # DNS resolution
+    - ports:
+        - protocol: UDP
+          port: 53
+{{- end }}

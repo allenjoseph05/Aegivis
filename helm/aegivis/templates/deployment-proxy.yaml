@@ -1,21 +1,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "agentblackbox.fullname" . }}-proxy
+  name: {{ include "aegivis.fullname" . }}-proxy
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "agentblackbox.labels" . | nindent 4 }}
+    {{- include "aegivis.labels" . | nindent 4 }}
     app.kubernetes.io/component: proxy
 spec:
   replicas: {{ .Values.proxy.replicaCount }}
   selector:
     matchLabels:
-      {{- include "agentblackbox.selectorLabels" . | nindent 6 }}
+      {{- include "aegivis.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: proxy
   template:
     metadata:
       labels:
-        {{- include "agentblackbox.selectorLabels" . | nindent 8 }}
+        {{- include "aegivis.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: proxy
     spec:
       containers:
@@ -27,41 +27,41 @@ spec:
               containerPort: 8080
               protocol: TCP
           env:
-            - name: ABB_BACKEND_URL
+            - name: AEGIVIS_BACKEND_URL
               valueFrom:
                 configMapKeyRef:
-                  name: {{ include "agentblackbox.fullname" . }}-config
-                  key: ABB_BACKEND_URL
-            - name: ABB_ORG_ID
+                  name: {{ include "aegivis.fullname" . }}-config
+                  key: AEGIVIS_BACKEND_URL
+            - name: AEGIVIS_ORG_ID
               valueFrom:
                 configMapKeyRef:
-                  name: {{ include "agentblackbox.fullname" . }}-config
-                  key: ABB_ORG_ID
-            - name: ABB_LOG_LEVEL
+                  name: {{ include "aegivis.fullname" . }}-config
+                  key: AEGIVIS_ORG_ID
+            - name: AEGIVIS_LOG_LEVEL
               valueFrom:
                 configMapKeyRef:
-                  name: {{ include "agentblackbox.fullname" . }}-config
-                  key: ABB_LOG_LEVEL
-            - name: ABB_PII_ENABLED
+                  name: {{ include "aegivis.fullname" . }}-config
+                  key: AEGIVIS_LOG_LEVEL
+            - name: AEGIVIS_PII_ENABLED
               valueFrom:
                 configMapKeyRef:
-                  name: {{ include "agentblackbox.fullname" . }}-config
-                  key: ABB_PII_ENABLED
-            - name: ABB_METRICS_ENABLED
+                  name: {{ include "aegivis.fullname" . }}-config
+                  key: AEGIVIS_PII_ENABLED
+            - name: AEGIVIS_METRICS_ENABLED
               valueFrom:
                 configMapKeyRef:
-                  name: {{ include "agentblackbox.fullname" . }}-config
-                  key: ABB_METRICS_ENABLED
-            - name: ABB_OTEL_ENABLED
+                  name: {{ include "aegivis.fullname" . }}-config
+                  key: AEGIVIS_METRICS_ENABLED
+            - name: AEGIVIS_OTEL_ENABLED
               valueFrom:
                 configMapKeyRef:
-                  name: {{ include "agentblackbox.fullname" . }}-config
-                  key: ABB_OTEL_ENABLED
-            - name: ABB_BACKEND_API_KEY
+                  name: {{ include "aegivis.fullname" . }}-config
+                  key: AEGIVIS_OTEL_ENABLED
+            - name: AEGIVIS_BACKEND_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.proxy.secretName }}
-                  key: ABB_BACKEND_API_KEY
+                  key: AEGIVIS_BACKEND_API_KEY
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
