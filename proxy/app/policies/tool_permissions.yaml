@@ -1,4 +1,4 @@
-# AgentBlackBox — Tool Permissions Configuration
+# Aegivis — Tool Permissions Configuration
 #
 # These rules are evaluated at every TOOL_CALL_START event, BEFORE the main
 # policy engine.  A BLOCK here prevents both the tool execution AND the
@@ -166,7 +166,7 @@ permissions:
     action: ALERT
     reason: >-
       Outbound HTTP tool call detected. Verify the URL is on the
-      approved allowlist (ABB_SECURITY_SSRF_ALLOWED_DOMAINS).
+      approved allowlist (AEGIVIS_SECURITY_SSRF_ALLOWED_DOMAINS).
     enabled: false
 
   # ── Category 4: High-value operation alerts ───────────────────────────────

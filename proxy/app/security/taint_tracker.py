@@ -62,7 +62,15 @@ _SINK_ARG_KEYS: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 
 class TaintTracker:
-    """Per-session credential taint store. Not persisted to Redis."""
+    """Per-session credential taint store. Not persisted to Redis.
+
+    Limitation: If the proxy restarts mid-session, this in-memory taint store
+    is lost. A multi-turn exfiltration chain that began before the restart will
+    not be detected — the taint store starts empty on restart. The Session PDG
+    (session_pdg.py) has the same limitation. Mitigation: rolling restart windows
+    should be short relative to typical session duration, and the canary token
+    system provides a complementary detection layer that is stateless.
+    """
 
     def __init__(self) -> None:
         self._taints: list[TaintedValue] = []

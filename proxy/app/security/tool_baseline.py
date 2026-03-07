@@ -175,7 +175,7 @@ async def get_approved_baseline(
     Args:
         agent_id:    The agent whose baseline to look up.
         org_id:      Organisation identifier (for multi-tenancy).
-        backend_url: Base URL of the AgentBlackBox backend.
+        backend_url: Base URL of the Aegivis backend.
         api_key:     API key for backend authentication.
         cache_ttl_s: Seconds before the cached entry expires.
 
@@ -239,7 +239,7 @@ async def report_tools_observed(
         org_id:      Organisation identifier.
         tools:       Raw tools[] from the request body.
         session_id:  Session that first surfaced these tools.
-        backend_url: Base URL of the AgentBlackBox backend.
+        backend_url: Base URL of the Aegivis backend.
         api_key:     API key for backend authentication.
     """
     import httpx

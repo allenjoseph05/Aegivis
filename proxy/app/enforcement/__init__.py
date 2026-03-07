@@ -176,22 +176,18 @@ def scan_messages(messages: list[dict]) -> EnforcementScanResult:
         fused = s + e * (1.0 - s)
         fused = float(min(1.0, fused))
 
-        # ── Sync ML classifier (optional, adds ~50ms) ──────────────────────
+        # ── Sync ML classifier (DeBERTa) ────────────────────────────────────
         # When analysis_classifier_sync_enabled=True, run DeBERTa inline.
-        # This is the primary high-accuracy detection layer (88-99% PINT).
-        # Score fused in same residual space: fused = fused + clf * (1 - fused)
-        # We scan the canonicalized text (encoding-normalized) so the classifier
-        # also catches obfuscated attacks that the structural layer decoded.
+        # Score fused in residual space: fused = fused + clf * (1 - fused)
+        # Scans canonicalized text so obfuscated attacks are also caught.
         clf_score = 0.0
         clf_label = ""
         if settings.analysis_classifier_sync_enabled:
             try:
-                from ..analysis.classifier import classify, is_available as clf_avail
+                from ..analysis.classifier import is_available as clf_avail
                 if clf_avail():
-                    # Build text window(s) for classification.
-                    # DeBERTa handles up to ~512 tokens ≈ 2048 chars.
-                    # For long texts, scan BOTH start and tail — attacks are
-                    # often appended after legitimate-looking preamble content.
+                    # Build text window(s): scan start AND tail for long texts
+                    # so padding-evasion attacks appended after the 2k mark are caught.
                     joined = " ".join(canonical_segments)
                     if len(joined) <= 2048:
                         windows = [joined]
@@ -200,6 +196,9 @@ def scan_messages(messages: list[dict]) -> EnforcementScanResult:
 
                     clf_score = 0.0
                     clf_label = ""
+
+                    # ── Primary sync model: DeBERTa ─────────────────────────
+                    from ..analysis.classifier import classify
                     for window in windows:
                         _r = classify(
                             window,
@@ -210,7 +209,7 @@ def scan_messages(messages: list[dict]) -> EnforcementScanResult:
                             clf_score = _r.score
                             clf_label = _r.label
 
-                    # ── Ensemble: second model (e.g. PromptGuard) ──────────
+                    # ── Ensemble: second model (e.g. PG-86M) ───────────────
                     # If a second classifier is configured, run it on the same
                     # windows and take max(primary, secondary).  Different
                     # architecture catches attacks the primary misses.

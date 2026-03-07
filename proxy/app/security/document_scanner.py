@@ -26,7 +26,7 @@ Graceful degradation
 --------------------
 PyMuPDF (fitz) and python-docx are OPTIONAL:
 
-    pip install 'agentblackbox-proxy[docs]'
+    pip install 'aegivis-proxy[docs]'
 
 If not installed, `scan_document()` returns detected=False with a note.
 The text-level scanners (unicode_scanner, tool_output_scanner) still run.

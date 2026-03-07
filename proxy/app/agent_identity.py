@@ -1,16 +1,16 @@
 """
-Agent identity validation for AgentBlackBox proxy.
+Agent identity validation for Aegivis proxy.
 
-Agents can optionally present a pre-shared key via the X-ABB-Agent-Key header.
+Agents can optionally present a pre-shared key via the X-Aegivis-Agent-Key header.
 The proxy validates it against configured keys and resolves the canonical agent_id.
 
 Configuration (env vars):
-    ABB_AGENT_KEYS=agent-alpha:key-abc123,agent-beta:key-def456
+    AEGIVIS_AGENT_KEYS=agent-alpha:key-abc123,agent-beta:key-def456
 
-If ABB_AGENT_KEYS is empty or ABB_REQUIRE_AGENT_KEY=false (default), the proxy
-accepts anonymous agents and uses X-ABB-Agent-ID or "unknown-agent" as the ID.
+If AEGIVIS_AGENT_KEYS is empty or AEGIVIS_REQUIRE_AGENT_KEY=false (default), the proxy
+accepts anonymous agents and uses X-Aegivis-Agent-ID or "unknown-agent" as the ID.
 
-When ABB_REQUIRE_AGENT_KEY=true, requests without a valid key are rejected with 401.
+When AEGIVIS_REQUIRE_AGENT_KEY=true, requests without a valid key are rejected with 401.
 """
 from __future__ import annotations
 
@@ -23,12 +23,12 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
-# Parsed from ABB_AGENT_KEYS on first access
+# Parsed from AEGIVIS_AGENT_KEYS on first access
 _key_map: dict[str, str] | None = None   # key -> agent_id
 
 
 def _parse_key_map() -> dict[str, str]:
-    """Parse ABB_AGENT_KEYS=agent1:key1,agent2:key2 into {key: agent_id}."""
+    """Parse AEGIVIS_AGENT_KEYS=agent1:key1,agent2:key2 into {key: agent_id}."""
     result: dict[str, str] = {}
     raw = settings.agent_keys.strip()
     if not raw:
@@ -54,7 +54,7 @@ def validate_agent_key(
     agent_id_header: str | None,
 ) -> tuple[bool, str, str | None]:
     """
-    Validate X-ABB-Agent-Key against configured keys.
+    Validate X-Aegivis-Agent-Key against configured keys.
 
     Returns:
         (is_valid, resolved_agent_id, error_message)
@@ -69,7 +69,7 @@ def validate_agent_key(
             return True, key_map[agent_key], None
         else:
             if settings.require_agent_key:
-                return False, "unknown", "Invalid X-ABB-Agent-Key"
+                return False, "unknown", "Invalid X-Aegivis-Agent-Key"
             else:
                 # Key provided but unknown — warn and continue as unidentified
                 logger.warning(f"Unknown agent key presented, treating as anonymous")
@@ -77,7 +77,7 @@ def validate_agent_key(
                 return True, resolved, None
     else:
         if settings.require_agent_key and key_map:
-            return False, "unknown", "X-ABB-Agent-Key header required"
+            return False, "unknown", "X-Aegivis-Agent-Key header required"
         resolved = agent_id_header or "unknown-agent"
         return True, resolved, None
 
@@ -85,10 +85,10 @@ def validate_agent_key(
 def generate_agent_key(agent_id: str) -> str:
     """Generate a new secure key for an agent (for local dev / testing)."""
     raw = f"{agent_id}:{time.time_ns()}:{secrets.token_hex(16)}"
-    return "abb_" + hashlib.sha256(raw.encode()).hexdigest()[:32]
+    return "aegivis_" + hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
 def invalidate_key_cache() -> None:
-    """Force re-parse of ABB_AGENT_KEYS on next call (after config reload)."""
+    """Force re-parse of AEGIVIS_AGENT_KEYS on next call (after config reload)."""
     global _key_map
     _key_map = None

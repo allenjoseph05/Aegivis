@@ -1,5 +1,5 @@
 """
-AgentBlackBox LLM Proxy — FastAPI application.
+Aegivis LLM Proxy — FastAPI application.
 
 Routes all LLM API traffic through the proxy for forensic capture.
 
@@ -11,12 +11,17 @@ Usage (set one env var per provider):
 from __future__ import annotations
 
 import asyncio
+import functools
+import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Body, FastAPI, HTTPException, Request, Response
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -57,8 +62,8 @@ _HOP_BY_HOP = frozenset({
     "host", "connection", "keep-alive", "proxy-authenticate",
     "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
     "content-length",
-    "x-abb-session-id", "x-abb-agent-id", "x-abb-org-id",
-    "x-abb-parent-agent-id", "x-abb-parent-session-id",
+    "x-aegivis-session-id", "x-aegivis-agent-id", "x-aegivis-org-id",
+    "x-aegivis-parent-agent-id", "x-aegivis-parent-session-id",
 })
 
 # Paths that trigger LLM interception (intercept these, passthrough everything else)
@@ -81,7 +86,6 @@ async def lifespan(app: FastAPI):
     await transport.start()
 
     # Load policy engine
-    from pathlib import Path
     if settings.policy_yaml:
         reload_policy_engine(yaml_path=Path(settings.policy_yaml))
     else:
@@ -98,6 +102,14 @@ async def lifespan(app: FastAPI):
             f"({tp_engine.enabled_rule_count} enabled)"
         )
 
+    # Warn if capability manifest signing key is not set (Phase 12)
+    if not settings.manifest_signing_key:
+        logger.warning(
+            "AEGIVIS_MANIFEST_SIGNING_KEY is not set — capability manifest signatures "
+            "will not be verified. Set to a 32+ char secret shared with the backend "
+            "for tamper-proof manifest enforcement."
+        )
+
     # Setup OpenTelemetry tracing (Phase 3.4)
     if settings.otel_enabled:
         from .tracing import setup_tracing
@@ -107,8 +119,8 @@ async def lifespan(app: FastAPI):
         )
         if not ok:
             logger.warning(
-                "OTel tracing requested (ABB_OTEL_ENABLED=true) but packages missing. "
-                "Install with: pip install 'agentblackbox-proxy[observability]'"
+                "OTel tracing requested (AEGIVIS_OTEL_ENABLED=true) but packages missing. "
+                "Install with: pip install 'aegivis-proxy[observability]'"
             )
 
     # Background stale-session cleanup every 30 minutes
@@ -117,11 +129,23 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(1800)
             get_session_tracker().evict_stale()
 
-    evict_task = asyncio.create_task(_evict_loop(), name="abb-session-evict")
+    evict_task = asyncio.create_task(_evict_loop(), name="aegivis-session-evict")
+
+    # Warm the security config cache for the default org so the first burst of
+    # requests after deployment never all hit the backend simultaneously.
+    # Agent-level configs are warmed lazily on first request per agent.
+    try:
+        from .security.remote_config import get_security_config
+        await get_security_config(settings.org_id)
+        logger.info("Security config cache warmed for org=%s", settings.org_id)
+    except Exception as _wexc:
+        logger.debug(
+            "Security config cache warm-up skipped (backend not yet ready): %s", _wexc
+        )
 
     buf_status = transport.buffer_status()
     logger.info(
-        f"AgentBlackBox Proxy ready on {settings.host}:{settings.port} | "
+        f"Aegivis Proxy ready on {settings.host}:{settings.port} | "
         f"active sessions: {tracker.active_count()} | "
         f"buffered events: {buf_status.get('events', 0)}"
     )
@@ -132,11 +156,11 @@ async def lifespan(app: FastAPI):
     # Persist session state before transport stops (so in-flight events get the right hashes)
     tracker.save()
     await transport.stop()
-    logger.info("AgentBlackBox Proxy shutdown complete")
+    logger.info("Aegivis Proxy shutdown complete")
 
 
 app = FastAPI(
-    title="AgentBlackBox LLM Proxy",
+    title="Aegivis LLM Proxy",
     version="1.0.0",
     docs_url="/docs",
     lifespan=lifespan,
@@ -152,11 +176,9 @@ if settings.metrics_enabled:
         logger.info("Prometheus /metrics endpoint mounted")
 
 # Allow the dashboard (and any local dev origin) to call the management API.
-# The proxy management endpoints (/health, /policies, /tool-permissions) are
-# internal admin APIs — broad CORS is acceptable for a self-hosted tool.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -170,10 +192,10 @@ def _extract_headers(request: Request) -> dict[str, str]:
     }
 
 
-def _get_abb_headers(request: Request) -> dict[str, str | None] | Response:
-    """Extract AgentBlackBox headers. Returns a Response if agent identity is invalid."""
-    agent_key = request.headers.get("x-abb-agent-key")
-    agent_id_header = request.headers.get("x-abb-agent-id", "unknown-agent")
+def _get_aegivis_headers(request: Request) -> dict[str, str | None] | Response:
+    """Extract Aegivis headers. Returns a Response if agent identity is invalid."""
+    agent_key = request.headers.get("x-aegivis-agent-key")
+    agent_id_header = request.headers.get("x-aegivis-agent-id", "unknown-agent")
 
     is_valid, resolved_agent_id, error = validate_agent_key(agent_key, agent_id_header)
     if not is_valid:
@@ -183,11 +205,11 @@ def _get_abb_headers(request: Request) -> dict[str, str | None] | Response:
         )
 
     return {
-        "session_id":        request.headers.get("x-abb-session-id"),
+        "session_id":        request.headers.get("x-aegivis-session-id"),
         "agent_id":          resolved_agent_id,
-        "org_id":            request.headers.get("x-abb-org-id", settings.org_id),
-        "parent_agent_id":   request.headers.get("x-abb-parent-agent-id") or None,
-        "parent_session_id": request.headers.get("x-abb-parent-session-id") or None,
+        "org_id":            request.headers.get("x-aegivis-org-id", settings.org_id),
+        "parent_agent_id":   request.headers.get("x-aegivis-parent-agent-id") or None,
+        "parent_session_id": request.headers.get("x-aegivis-parent-session-id") or None,
     }
 
 
@@ -210,17 +232,27 @@ async def _proxy_and_capture(
     """
     Core proxy handler: intercept, policy-check, forward, capture response.
     """
-    abb = _get_abb_headers(request)
+    abb = _get_aegivis_headers(request)
     # Agent identity check failed — return 401 directly
     if isinstance(abb, Response):
         return abb
 
     body_bytes = await request.body()
 
-    import json as _json
+    # Reject oversized payloads before any processing
+    limit = settings.max_request_body_bytes
+    if limit > 0 and len(body_bytes) > limit:
+        return JSONResponse(
+            status_code=413,
+            content={
+                "error": "payload_too_large",
+                "detail": f"Request body exceeds {limit} bytes limit.",
+            },
+        )
+
     try:
-        body = _json.loads(body_bytes) if body_bytes else {}
-    except _json.JSONDecodeError:
+        body = json.loads(body_bytes) if body_bytes else {}
+    except json.JSONDecodeError:
         body = {}
 
     is_stream = body.get("stream", False)
@@ -276,16 +308,15 @@ async def _proxy_and_capture(
                 "session_id": session_id,
             },
             headers={
-                "X-ABB-Policy-Rule": v.rule_name,
-                "X-ABB-Session-ID": session_id,
+                "X-Aegivis-Policy-Rule": v.rule_name,
+                "X-Aegivis-Session-ID": session_id,
             },
         )
 
     # If canary injection / spotlighting modified the messages, re-serialize
     # the body so the modified version is forwarded to the upstream LLM.
     if forward_body is not None:
-        import json as _json2
-        body_bytes = _json2.dumps(forward_body).encode("utf-8")
+        body_bytes = json.dumps(forward_body).encode("utf-8")
 
     # Forward request upstream
     upstream_url = f"{upstream_base}{downstream_path}"
@@ -361,7 +392,6 @@ async def _handle_non_streaming(
     )
     latency_ms = (time.time() - t_start) * 1000
 
-    import json as _json
     try:
         resp_body = resp.json()
     except Exception:
@@ -398,8 +428,8 @@ async def _handle_non_streaming(
                 "session_id": session_id,
             },
             headers={
-                "X-ABB-Policy-Rule": rv.rule_name,
-                "X-ABB-Session-ID": session_id,
+                "X-Aegivis-Policy-Rule": rv.rule_name,
+                "X-Aegivis-Session-ID": session_id,
             },
         )
 
@@ -442,7 +472,22 @@ async def _handle_streaming(
                 # Forward to agent immediately
                 if line.startswith("data: "):
                     data_part = line[6:]
-                    chunk = provider_cls.parse_sse_chunk(data_part)
+                    # Ollama needs the path to pick the right parser
+                    # (OpenAI-compat /v1/ vs native /api/chat)
+                    if provider_name == "ollama":
+                        chunk = provider_cls.parse_sse_chunk(data_part, path=downstream_path)
+                    else:
+                        chunk = provider_cls.parse_sse_chunk(data_part)
+                    is_done = assembler.feed(chunk)
+                    if is_done:
+                        complete = True
+                elif (
+                    provider_name == "ollama"
+                    and "/v1/" not in downstream_path
+                    and line.strip()
+                ):
+                    # Ollama native /api/chat streams raw JSON lines (no SSE prefix)
+                    chunk = provider_cls.parse_sse_chunk(line, path=downstream_path)
                     is_done = assembler.feed(chunk)
                     if is_done:
                         complete = True
@@ -507,7 +552,7 @@ async def azure_proxy(path: str, request: Request):
     downstream = f"/{path}"
     upstream = settings.azure_upstream
     if not upstream:
-        raise HTTPException(status_code=503, detail="ABB_AZURE_UPSTREAM not configured")
+        raise HTTPException(status_code=503, detail="AEGIVIS_AZURE_UPSTREAM not configured")
     if _should_intercept("azure", downstream):
         return await _proxy_and_capture(request, "azure", upstream, downstream, AzureProvider)
     return await _passthrough(request, upstream, downstream)
@@ -529,6 +574,16 @@ async def _passthrough(request: Request, upstream_base: str, path: str) -> Respo
 
     headers = _extract_headers(request)
     body_bytes = await request.body()
+
+    limit = settings.max_request_body_bytes
+    if limit > 0 and len(body_bytes) > limit:
+        return JSONResponse(
+            status_code=413,
+            content={
+                "error": "payload_too_large",
+                "detail": f"Request body exceeds {limit} bytes limit.",
+            },
+        )
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
         resp = await client.request(
@@ -555,7 +610,7 @@ async def health():
     buf = transport.buffer_status()
     return {
         "status": "ok",
-        "service": "agentblackbox-proxy",
+        "service": "aegivis-proxy",
         "version": "1.0.0",
         "providers": list(PROVIDERS.keys()),
         "policy_rules": engine.rule_count,
@@ -574,7 +629,7 @@ def _require_admin_key(request: Request) -> JSONResponse | None:
     Enforce the admin API key on management write endpoints.
 
     Returns a JSONResponse 403 if authentication fails, None if it passes.
-    When ABB_ADMIN_API_KEY is empty (default), all callers are allowed
+    When AEGIVIS_ADMIN_API_KEY is empty (default), all callers are allowed
     (suitable for local development / Docker Compose setups with no exposure).
     """
     required_key = settings.admin_api_key.strip()
@@ -582,8 +637,8 @@ def _require_admin_key(request: Request) -> JSONResponse | None:
         return None  # admin auth disabled — open access
 
     provided_key = (
-        request.headers.get("X-ABB-Admin-Key")
-        or request.headers.get("x-abb-admin-key")
+        request.headers.get("X-Aegivis-Admin-Key")
+        or request.headers.get("x-aegivis-admin-key")
         or ""
     ).strip()
 
@@ -593,8 +648,8 @@ def _require_admin_key(request: Request) -> JSONResponse | None:
             content={
                 "error": "admin_auth_required",
                 "detail": (
-                    "This endpoint requires a valid X-ABB-Admin-Key header. "
-                    "Set ABB_ADMIN_API_KEY on the proxy to configure authentication."
+                    "This endpoint requires a valid X-Aegivis-Admin-Key header. "
+                    "Set AEGIVIS_ADMIN_API_KEY on the proxy to configure authentication."
                 ),
             },
         )
@@ -614,7 +669,7 @@ async def reload_policies(request: Request):
     """
     Reload policy rules from JSON body or from default YAML file.
 
-    Requires X-ABB-Admin-Key header when ABB_ADMIN_API_KEY is configured.
+    Requires X-Aegivis-Admin-Key header when AEGIVIS_ADMIN_API_KEY is configured.
     Body (optional): {"rules": [...]}
     """
     auth_error = _require_admin_key(request)
@@ -627,7 +682,6 @@ async def reload_policies(request: Request):
     except Exception:
         rules_data = None
 
-    from pathlib import Path
     if rules_data is not None:
         count = reload_policy_engine(rules_data=rules_data)
     elif settings.policy_yaml:
@@ -662,9 +716,9 @@ async def reload_tool_permissions_api(request: Request):
     """
     Hot-reload tool permission rules from a JSON body or the configured YAML.
 
-    Requires X-ABB-Admin-Key header when ABB_ADMIN_API_KEY is configured.
+    Requires X-Aegivis-Admin-Key header when AEGIVIS_ADMIN_API_KEY is configured.
     Body (optional): {"rules": [...]}  -- list of rule dicts in YAML schema
-    No body          -- reload from ABB_TOOL_PERMISSIONS_YAML or bundled file
+    No body          -- reload from AEGIVIS_TOOL_PERMISSIONS_YAML or bundled file
     """
     auth_error = _require_admin_key(request)
     if auth_error:
@@ -676,7 +730,6 @@ async def reload_tool_permissions_api(request: Request):
     except Exception:
         rules_data = None
 
-    from pathlib import Path
     if rules_data is not None:
         count = reload_tool_permissions_engine(rules_data=rules_data)
     elif settings.tool_permissions_yaml:
@@ -700,6 +753,10 @@ async def reload_tool_permissions_api(request: Request):
 _benchmark_cache: dict | None = None
 
 
+class BenchmarkRunRequest(BaseModel):
+    use_classifier: bool = False
+
+
 @app.get("/benchmark/last")
 async def get_last_benchmark():
     """
@@ -713,22 +770,27 @@ async def get_last_benchmark():
 
 
 @app.post("/benchmark/run")
-async def run_benchmark_endpoint():
+async def run_benchmark_endpoint(req: BenchmarkRunRequest | None = Body(default=None)):
     """
     Run the full security benchmark against the labelled attack dataset.
 
     Executes synchronously in a thread-pool executor to avoid blocking the
     event loop.  Returns the full BenchmarkReport as JSON and caches it.
 
+    Optional body: {"use_classifier": true} — include DeBERTa ML classifier
+    in each scan (adds ~50ms/case; requires aegivis-proxy[classifier]).
+
     Typical runtime: 0.5-5s (structural only) to 30-120s (with semantic/
     classifier layers active).
     """
     global _benchmark_cache
+    use_clf = req.use_classifier if req else False
     try:
         from .benchmark import run_benchmark
-        import asyncio
         loop = asyncio.get_running_loop()
-        report = await loop.run_in_executor(None, run_benchmark)
+        report = await loop.run_in_executor(
+            None, functools.partial(run_benchmark, use_classifier=use_clf)
+        )
         _benchmark_cache = report.to_dict()
         return _benchmark_cache
     except ImportError as exc:
@@ -765,7 +827,7 @@ async def get_last_external_benchmark():
 
 
 @app.post("/benchmark/external/run")
-async def run_external_benchmark_endpoint():
+async def run_external_benchmark_endpoint(req: BenchmarkRunRequest | None = Body(default=None)):
     """
     Run the security benchmark against real-world HuggingFace datasets.
 
@@ -776,16 +838,20 @@ async def run_external_benchmark_endpoint():
     BENCHMARK_EXTERNAL_TIMEOUT_S env var).  If the benchmark does not complete
     within that window a 504 is returned with guidance on reducing sample size.
 
+    Optional body: {"use_classifier": true} — include DeBERTa ML classifier.
+
     Requires: pip install datasets
     """
     global _external_benchmark_cache
-    import os as _os
-    _timeout_s = int(_os.environ.get("BENCHMARK_EXTERNAL_TIMEOUT_S", "600"))
+    use_clf = req.use_classifier if req else False
+    _timeout_s = int(os.environ.get("BENCHMARK_EXTERNAL_TIMEOUT_S", "600"))
     loop = asyncio.get_running_loop()
     try:
         from .benchmark import run_external_benchmark
         report = await asyncio.wait_for(
-            loop.run_in_executor(None, run_external_benchmark),
+            loop.run_in_executor(
+                None, functools.partial(run_external_benchmark, use_classifier=use_clf)
+            ),
             timeout=_timeout_s,
         )
         _external_benchmark_cache = report.to_dict()
@@ -822,3 +888,162 @@ async def run_external_benchmark_endpoint():
             status_code=500,
             detail=f"External benchmark failed: {exc}",
         )
+
+
+# ─── Security Playground endpoint ───────────────────────────────────────────
+
+@app.post("/playground/scan")
+async def playground_scan(request: Request):
+    """
+    Scan arbitrary text through the sync security enforcement pipeline.
+
+    Used by the dashboard Security Playground so operators can paste prompts,
+    tool calls, or tool outputs and see exactly which layers fire and why.
+
+    Body:
+      { "text": "...", "mode": "prompt" }
+      { "mode": "tool_call", "tool_name": "http_request", "tool_args": {...} }
+
+    Returns per-layer scores and an overall verdict with latency.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    mode = body.get("mode", "prompt")
+    text = body.get("text", "")
+    tool_name = body.get("tool_name", "unknown_tool")
+    tool_args = body.get("tool_args", {})
+
+    t0 = time.perf_counter()
+    layers: list[dict] = []
+    overall_score = 0.0
+    would_block = False
+
+    try:
+        if mode in ("prompt", "tool_output"):
+            from .enforcement import scan_messages
+            messages = [{"role": "user", "content": text}]
+            result = scan_messages(messages)
+
+            # Structural layer
+            seg = result.structural.per_segment[0] if result.structural.per_segment else None
+            layers.append({
+                "id": "structural",
+                "name": "Structural Scanner",
+                "score": round(result.structural.score, 4),
+                "label": result.structural.label,
+                "triggered": result.structural.score >= settings.security_injection_alert_threshold,
+                "details": {
+                    "matched_phrases": seg.matched_phrases[:5] if seg else [],
+                    "delimiter_hits": seg.delimiter_hits if seg else 0,
+                    "phrase_score": round(result.structural.per_segment[0].phrase_score, 4) if seg and hasattr(seg, "phrase_score") else 0.0,
+                },
+            })
+
+            # Encoding layer
+            layers.append({
+                "id": "encoding",
+                "name": "Encoding Normalizer",
+                "score": round(result.encoding_score, 4),
+                "label": "triggered" if result.encoding_detected else "safe",
+                "triggered": bool(result.encoding_detected),
+                "details": {"encoding_detected": result.encoding_detected},
+            })
+
+            # Credential layer
+            layers.append({
+                "id": "credential",
+                "name": "Credential Scanner",
+                "score": 1.0 if result.credential_detected else 0.0,
+                "label": "detected" if result.credential_detected else "safe",
+                "triggered": result.credential_detected,
+                "details": {"credential_count": result.credential_count},
+            })
+
+            # ML classifier (only if sync mode ran it)
+            if result.classifier_score > 0.0:
+                layers.append({
+                    "id": "ml_classifier",
+                    "name": "ML Classifier (DeBERTa)",
+                    "score": round(result.classifier_score, 4),
+                    "label": result.classifier_label or "safe",
+                    "triggered": result.classifier_score >= settings.analysis_classifier_threshold,
+                    "details": {"model": settings.analysis_classifier_model},
+                })
+
+            # Unicode steganography
+            try:
+                from .security.unicode_scanner import scan_unicode_stego
+                unicode_r = scan_unicode_stego(text)
+                layers.append({
+                    "id": "unicode",
+                    "name": "Unicode Steganography",
+                    "score": 1.0 if unicode_r.detected else 0.0,
+                    "label": unicode_r.severity if unicode_r.detected else "safe",
+                    "triggered": unicode_r.detected,
+                    "details": {
+                        "invisible_char_count": unicode_r.invisible_char_count,
+                        "tag_decoded": unicode_r.tag_decoded or "",
+                    },
+                })
+            except Exception:
+                pass
+
+            overall_score = result.injection_score
+            block_t = settings.security_injection_block_threshold
+            would_block = overall_score >= block_t or result.credential_detected
+
+        elif mode == "tool_call":
+            from .enforcement import scan_tool_call
+            tool_result = scan_tool_call(tool_name, tool_args)
+
+            layers.append({
+                "id": "rce",
+                "name": "RCE Scanner",
+                "score": 1.0 if tool_result.rce_detected else 0.0,
+                "label": "detected" if tool_result.rce_detected else "safe",
+                "triggered": tool_result.rce_detected,
+                "details": {},
+            })
+            layers.append({
+                "id": "ssrf",
+                "name": "SSRF Scanner",
+                "score": 1.0 if tool_result.ssrf_detected else 0.0,
+                "label": "detected" if tool_result.ssrf_detected else "safe",
+                "triggered": tool_result.ssrf_detected,
+                "details": {},
+            })
+
+            overall_score = 1.0 if (tool_result.rce_detected or tool_result.ssrf_detected) else 0.0
+            would_block = bool(overall_score)
+
+        else:
+            return JSONResponse({"error": f"unknown mode: {mode}"}, status_code=400)
+
+    except Exception as exc:
+        logger.warning("playground_scan error: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    latency_ms = (time.perf_counter() - t0) * 1000
+    block_t = settings.security_injection_block_threshold
+    alert_t = settings.security_injection_alert_threshold
+    would_alert = (overall_score >= alert_t) and not would_block
+
+    if would_block:
+        overall_label = "malicious"
+    elif would_alert:
+        overall_label = "suspicious"
+    else:
+        overall_label = "safe"
+
+    return {
+        "overall_score": round(overall_score, 4),
+        "overall_label": overall_label,
+        "would_block": would_block,
+        "would_alert": would_alert,
+        "layers": layers,
+        "latency_ms": round(latency_ms, 2),
+        "thresholds": {"block": block_t, "alert": alert_t},
+    }

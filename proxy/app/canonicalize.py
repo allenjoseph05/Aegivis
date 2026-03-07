@@ -126,6 +126,7 @@ def make_llm_call_end(
     token_usage: dict | None,
     latency_ms: float | None,
     http_status: int | None = None,
+    thinking_blocks: list[dict] | None = None,
     sequence_number: int = 0,
     previous_hash: str = "",
 ) -> dict:
@@ -154,6 +155,8 @@ def make_llm_call_end(
         "token_usage": norm_usage,
         "latency_ms": latency_ms,
         "http_status": http_status,
+        "has_reasoning_trace": bool(thinking_blocks),
+        "thinking_blocks": thinking_blocks or [],
     }
 
     event_id = str(ULID())
