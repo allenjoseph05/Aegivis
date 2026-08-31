@@ -1,9 +1,9 @@
 # =============================================================================
-# AgentBlackBox — .gitignore
+# Aegivis - .gitignore
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# SECRETS — never commit these
+# Secrets - never commit these
 # -----------------------------------------------------------------------------
 .env
 .env.local
@@ -64,20 +64,25 @@ dashboard/.vite/
 *.tsbuildinfo
 
 # -----------------------------------------------------------------------------
-# ML artifacts (generated, large — committed separately if needed)
+# ML artifacts - generated, large; committed separately only if intentional
 # -----------------------------------------------------------------------------
 agent_models/
 *.pkl
 *.joblib
-attack_vectors.npz          # regenerated from source; do not commit large binary
+attack_vectors.npz
 load_tests/results/
 
 # -----------------------------------------------------------------------------
 # Docker
 # -----------------------------------------------------------------------------
-# Keep docker-compose.yml but ignore local overrides
+# Keep docker-compose.yml but ignore local overrides.
 docker-compose.override.yml
 docker-compose.local.yml
+
+# -----------------------------------------------------------------------------
+# Enterprise - excluded from the public community repository
+# -----------------------------------------------------------------------------
+enterprise/
 
 # -----------------------------------------------------------------------------
 # Database / data
@@ -87,10 +92,40 @@ docker-compose.local.yml
 postgres_data/
 
 # -----------------------------------------------------------------------------
-# Runtime data files (generated at runtime, should not be committed)
+# Runtime data files - generated at runtime, should not be committed
 # -----------------------------------------------------------------------------
+*_sessions.json
+aegivis_sessions.json
 proxy/abb_sessions.json
+proxy/aegivis_sessions.json
 proxy/tests/external_dataset_results.json
+
+# -----------------------------------------------------------------------------
+# Local planning / private research notes
+# -----------------------------------------------------------------------------
+planning/
+docs/private/
+CLAUDE.md
+ARCHITECTURE.md
+CONTAINMENT_BLUEPRINT.md
+CAUSAL_INTENT_LOCK.md
+IMPLEMENTATION_PLAN.md
+OPEN_CORE_PLAN.md
+REFACTORING.md
+SECURITY.md
+SECURITY_GAPS_*.md
+THREAT_COVERAGE_PLAN.md
+V2_*.md
+*_ROADMAP.md
+*_PLAN.md
+*_BLUEPRINT.md
+*_STRATEGY.md
+*_DETAIL.md
+
+# Binary/reference source material. Keep these local unless intentionally
+# published as release assets.
+*.docx
+security_threats.pdf
 
 # -----------------------------------------------------------------------------
 # OS artifacts
@@ -132,4 +167,3 @@ tmp/
 temp/
 scratch/
 spec_content.txt
-AgentBlackBox_Master_Specification.docx
