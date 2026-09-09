@@ -1,0 +1,44 @@
+{{- if .Values.controller.enabled }}
+---
+# MutatingWebhookConfiguration — caBundle is patched at runtime by the controller.
+# The controller generates a self-signed CA at startup and patches this resource
+# via the K8s API so the API server trusts the webhook TLS certificate.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ .Values.controller.webhook.configName }}
+  labels:
+    {{- include "aegivis.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+  annotations:
+    aegivis.io/caBundle-managed: "true"
+webhooks:
+  - name: inject.aegivis.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore   # Non-blocking: if webhook is down, pods still start
+    timeoutSeconds: 10
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - kube-public
+            - kube-node-lease
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+        scope: "Namespaced"
+    clientConfig:
+      service:
+        name: {{ .Values.controller.webhook.serviceName }}
+        namespace: {{ .Release.Namespace }}
+        path: /webhook
+        port: 443
+      # caBundle is empty here — patched at runtime by the controller.
+      # Set this manually if you are using a pre-existing CA (e.g. cert-manager).
+      caBundle: ""
+{{- end }}
