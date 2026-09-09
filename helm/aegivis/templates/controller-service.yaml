@@ -1,0 +1,21 @@
+{{- if .Values.controller.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.controller.webhook.serviceName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aegivis.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "aegivis.name" . }}-controller
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: {{ .Values.controller.webhook.port }}
+      protocol: TCP
+{{- end }}
