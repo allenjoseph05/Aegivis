@@ -111,6 +111,40 @@ podDisruptionBudget:
   backend:
     minAvailable: 1
 
+# ─── Controller (Admission Webhook + CRD Operator) ───────────────────────────
+controller:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: aegivis/controller
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+  # Webhook TLS settings
+  webhook:
+    port: 8443
+    # Name of the MutatingWebhookConfiguration (must match webhook.yaml)
+    configName: "aegivis-sidecar-injector"
+    # K8s service name for the controller (used in TLS SAN)
+    serviceName: "aegivis-controller"
+    serviceNamespace: ""   # defaults to Release.Namespace
+  # Proxy sidecar injected into agent pods
+  proxy:
+    image: "aegivis/proxy:1.0.0"
+    imagePullPolicy: IfNotPresent
+    port: 8080
+  # Namespace to watch (empty = cluster-wide)
+  watchNamespace: ""
+  env:
+    AEGIVIS_CTRL_LOG_LEVEL: "INFO"
+  secretName: "aegivis-secrets"
+
 # ─── Ingress ─────────────────────────────────────────────────────────────────
 ingress:
   enabled: false
