@@ -17,16 +17,74 @@ import { SessionDetail } from "./pages/SessionDetail";
 import { Forensics } from "./pages/Forensics";
 import { Compliance } from "./pages/Compliance";
 import { SecurityStack } from "./pages/SecurityStack";
-import { ExportPage } from "./pages/Export";
 import { BenchmarkPage } from "./pages/Benchmark";
 import { AgentsPage } from "./pages/Agents";
-import { AgentDetail } from "./pages/Agents/AgentDetail";
 import { ViolationsPage } from "./pages/Violations";
 import { SettingsPage } from "./pages/Settings";
-import { AnalyticsPage } from "./pages/Analytics";
-import { ApprovalsPage } from "./pages/Approvals";
-import { SecurityPosturePage } from "./pages/SecurityPosture";
-import { listApprovals } from "./api/client";
+
+// Enterprise pages — loaded lazily only when VITE_EDITION=enterprise.
+// Named exports are wrapped into { default } so React.lazy is satisfied.
+const AgentDetail = React.lazy(() =>
+  import("./pages/Agents/AgentDetail").then(m => ({ default: m.AgentDetail })));
+const ApprovalsPage = React.lazy(() =>
+  import("./pages/Approvals").then(m => ({ default: m.ApprovalsPage })));
+const SecurityPosturePage = React.lazy(() =>
+  import("./pages/SecurityPosture").then(m => ({ default: m.SecurityPosturePage })));
+const AnalyticsPage = React.lazy(() =>
+  import("./pages/Analytics").then(m => ({ default: m.AnalyticsPage })));
+const ExportPage = React.lazy(() =>
+  import("./pages/Export/ExportPage").then(m => ({ default: m.ExportPage })));
+
+// ---------------------------------------------------------------------------
+// Error reporting — structured JS error capture, self-hosted (no external SaaS)
+//
+// In production builds errors are POSTed to the backend's /v1/ingest endpoint
+// so they appear alongside agent events.  Set VITE_ERROR_REPORTING=false to
+// disable.  If you prefer Sentry, install @sentry/react and initialise it
+// here instead (using import.meta.env.VITE_SENTRY_DSN as the DSN gate).
+// ---------------------------------------------------------------------------
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+const REPORT_ERRORS =
+  import.meta.env.PROD && import.meta.env.VITE_ERROR_REPORTING !== "false";
+
+function reportError(error: Error, extra?: Record<string, unknown>) {
+  // Always log locally.
+  console.error("[aegivis] unhandled error", { error, ...extra });
+
+  if (!REPORT_ERRORS) return;
+
+  // Fire-and-forget POST to backend ingest (auth header is optional for this event type).
+  const payload = {
+    event_type: "JS_ERROR",
+    timestamp_ns: Date.now() * 1_000_000,
+    payload: {
+      message: error.message,
+      name: error.name,
+      stack: error.stack?.slice(0, 2_000),  // limit stack size
+      url: window.location.pathname,
+      user_agent: navigator.userAgent,
+      ...extra,
+    },
+  };
+  fetch(`${API_BASE}/v1/ingest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    keepalive: true,   // survives page unload
+  }).catch(() => {/* silently ignore reporting failures */});
+}
+
+// Capture uncaught errors and unhandled promise rejections outside React.
+if (typeof window !== "undefined") {
+  window.addEventListener("error", (e) => {
+    if (e.error instanceof Error) reportError(e.error, { source: "window.onerror" });
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const err = e.reason instanceof Error ? e.reason : new Error(String(e.reason));
+    reportError(err, { source: "unhandledrejection" });
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Error boundary — prevents a crash in one page from blanking the whole app
@@ -42,6 +100,12 @@ class ErrorBoundary extends React.Component<
   }
   static getDerivedStateFromError(error: Error) {
     return { error };
+  }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    reportError(error, {
+      source: "ErrorBoundary",
+      component_stack: info.componentStack?.slice(0, 1_000),
+    });
   }
   render() {
     if (this.state.error) {
@@ -73,12 +137,8 @@ const ROUTE_TITLES: Record<string, string> = {
   "/agents":     "Agents",
   "/sessions":   "Sessions",
   "/violations": "Violations",
-  "/approvals":  "Approvals",
   "/security":   "Security Stack",
-  "/posture":    "Security Posture",
   "/settings":   "Settings",
-  "/analytics":  "Analytics",
-  "/export":     "Export",
   "/benchmark":  "Benchmark",
 };
 
@@ -158,15 +218,42 @@ function NavSection({ label, children }: { label: string; children: React.ReactN
   );
 }
 
+// ---------------------------------------------------------------------------
+// Edition badge — shown in sidebar footer
+// ---------------------------------------------------------------------------
+
+const EDITION = (import.meta.env.VITE_EDITION ?? "community").toLowerCase();
+const IS_ENTERPRISE = EDITION === "enterprise";
+
+function EditionBadge() {
+  return (
+    <div className="px-4 py-3 border-t border-white/[0.06] flex items-center justify-between">
+      <span className="text-white/30 text-xs">v1.0.0</span>
+      {IS_ENTERPRISE ? (
+        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-300 border border-amber-400/30 tracking-wide">
+          ENTERPRISE
+        </span>
+      ) : (
+        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-white/[0.06] text-white/30 border border-white/[0.08] tracking-wide">
+          COMMUNITY
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
 function Layout({ children }: { children: React.ReactNode }) {
-  // Pending HITL approvals badge — poll every 10 s
+  // Approvals badge — polled only in enterprise mode
   const { data: pendingData } = useQuery({
     queryKey: ["approvals-count"],
-    queryFn: () => listApprovals({ status: "pending", limit: 1 }),
+    queryFn: () => import("./api/client").then(m => m.listApprovals({ status: "pending", limit: 1 })),
     refetchInterval: 10_000,
     staleTime: 0,
+    enabled: IS_ENTERPRISE,
   });
-  const pendingCount = pendingData?.count ?? 0;
+  const pendingCount = IS_ENTERPRISE ? (pendingData?.count ?? 0) : 0;
 
   return (
     <div className="min-h-screen bg-gray-50 flex">
@@ -185,26 +272,32 @@ function Layout({ children }: { children: React.ReactNode }) {
             <SidebarLink to="/agents" icon={Bot}>Agents</SidebarLink>
             <SidebarLink to="/sessions" icon={Activity}>Sessions</SidebarLink>
             <SidebarLink to="/violations" icon={ShieldAlert}>Violations</SidebarLink>
-            <SidebarLink to="/approvals" icon={Bell} badge={pendingCount}>Approvals</SidebarLink>
+            {IS_ENTERPRISE && (
+              <SidebarLink to="/approvals" icon={Bell} badge={pendingCount}>Approvals</SidebarLink>
+            )}
           </NavSection>
 
           <NavSection label="Security">
             <SidebarLink to="/security" icon={Layers}>Security Stack</SidebarLink>
-            <SidebarLink to="/posture" icon={TrendingUp}>Posture</SidebarLink>
+            {IS_ENTERPRISE && (
+              <SidebarLink to="/posture" icon={TrendingUp}>Posture</SidebarLink>
+            )}
             <SidebarLink to="/settings" icon={Cog}>Settings</SidebarLink>
           </NavSection>
 
           <NavSection label="Insights">
-            <SidebarLink to="/analytics" icon={BarChart2}>Analytics</SidebarLink>
-            <SidebarLink to="/export" icon={Download}>Export</SidebarLink>
+            {IS_ENTERPRISE && (
+              <SidebarLink to="/analytics" icon={BarChart2}>Analytics</SidebarLink>
+            )}
+            {IS_ENTERPRISE && (
+              <SidebarLink to="/export" icon={Download}>Export</SidebarLink>
+            )}
             <SidebarLink to="/benchmark" icon={Zap}>Benchmark</SidebarLink>
           </NavSection>
         </nav>
 
-        {/* Version footer */}
-        <div className="px-4 py-3 border-t border-white/[0.06]">
-          <span className="text-white/30 text-xs">v1.0.0</span>
-        </div>
+        {/* Edition footer */}
+        <EditionBadge />
       </aside>
 
       {/* ── Main content ───────────────────────────────────────────── */}
@@ -224,23 +317,43 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           <Routes>
             <Route path="/" element={<Navigate to="/overview" replace />} />
 
-            {/* Primary nav */}
+            {/* Community routes */}
             <Route path="/overview" element={<OverviewPage />} />
             <Route path="/agents" element={<AgentsPage />} />
-            <Route path="/agents/:agentId" element={<AgentDetail />} />
             <Route path="/sessions" element={<Sessions />} />
             {/* Legacy redirect for old /events URL */}
             <Route path="/events" element={<Navigate to="/sessions" replace />} />
             <Route path="/violations" element={<ViolationsPage />} />
-            <Route path="/approvals" element={<ApprovalsPage />} />
             <Route path="/security" element={<SecurityStack />} />
-            <Route path="/posture" element={<SecurityPosturePage />} />
             <Route path="/settings" element={<SettingsPage />} />
-
-            {/* Secondary nav */}
-            <Route path="/analytics" element={<AnalyticsPage />} />
-            <Route path="/export" element={<ExportPage />} />
             <Route path="/benchmark" element={<BenchmarkPage />} />
+
+            {/* Enterprise routes — only active when VITE_EDITION=enterprise */}
+            {IS_ENTERPRISE && (
+              <Route path="/agents/:agentId" element={
+                <React.Suspense fallback={null}><AgentDetail /></React.Suspense>
+              } />
+            )}
+            {IS_ENTERPRISE && (
+              <Route path="/approvals" element={
+                <React.Suspense fallback={null}><ApprovalsPage /></React.Suspense>
+              } />
+            )}
+            {IS_ENTERPRISE && (
+              <Route path="/posture" element={
+                <React.Suspense fallback={null}><SecurityPosturePage /></React.Suspense>
+              } />
+            )}
+            {IS_ENTERPRISE && (
+              <Route path="/analytics" element={
+                <React.Suspense fallback={null}><AnalyticsPage /></React.Suspense>
+              } />
+            )}
+            {IS_ENTERPRISE && (
+              <Route path="/export" element={
+                <React.Suspense fallback={null}><ExportPage /></React.Suspense>
+              } />
+            )}
 
             {/* Session detail routes */}
             <Route path="/sessions/:sessionId" element={<SessionDetail />} />

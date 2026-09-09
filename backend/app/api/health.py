@@ -11,7 +11,7 @@ router = APIRouter()
 
 @router.get("/health", summary="Health check")
 async def health():
-    return {"status": "ok", "service": "agentblackbox-backend", "version": "1.0.0"}
+    return {"status": "ok", "service": "aegivis-backend", "version": "1.0.0"}
 
 
 @router.get("/health/db", summary="Database health check")

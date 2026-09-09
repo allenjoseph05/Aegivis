@@ -1,21 +1,21 @@
 """
-Fixtures for AgentBlackBox end-to-end integration smoke tests.
+Fixtures for Aegivis end-to-end integration smoke tests.
 
 Requires the Docker Compose stack to be running:
     docker compose up -d
 
 Override URLs via environment variables:
-    ABB_PROXY_URL     (default: http://localhost:8080)
-    ABB_BACKEND_URL   (default: http://localhost:8000)
-    ABB_API_KEY       (default: dev-dashboard-key)
+    AEGIVIS_PROXY_URL     (default: http://localhost:8080)
+    AEGIVIS_BACKEND_URL   (default: http://localhost:8000)
+    AEGIVIS_API_KEY       (default: dev-dashboard-key)
 """
 import os
 import pytest
 import httpx
 
-PROXY_URL = os.getenv("ABB_PROXY_URL", "http://localhost:8080")
-BACKEND_URL = os.getenv("ABB_BACKEND_URL", "http://localhost:8000")
-API_KEY = os.getenv("ABB_API_KEY", "dev-dashboard-key")
+PROXY_URL = os.getenv("AEGIVIS_PROXY_URL", "http://localhost:8080")
+BACKEND_URL = os.getenv("AEGIVIS_BACKEND_URL", "http://localhost:8000")
+API_KEY = os.getenv("AEGIVIS_API_KEY", "dev-dashboard-key")
 
 
 @pytest.fixture(scope="session")

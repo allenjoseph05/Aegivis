@@ -1,6 +1,6 @@
-# AgentBlackBox — Default Policy Rules
+# Aegivis — Default Policy Rules
 # These policies are applied to every AI agent session by default.
-# Edit or override via ABB_POLICY_YAML env var pointing to a custom file.
+# Edit or override via AEGIVIS_POLICY_YAML env var pointing to a custom file.
 #
 # Actions:
 #   BLOCK      - Reject the request with 403 (before forwarding to LLM)
@@ -122,8 +122,8 @@ rules:
     reason: "Agent session has been running for more than 1 hour — verify this is expected."
     enabled: true
   # -- Security: prompt injection (Phase 3.1) --------------------------------
-  # Thresholds mirror ABB_SECURITY_INJECTION_BLOCK_THRESHOLD and
-  # ABB_SECURITY_INJECTION_ALERT_THRESHOLD.  Tune via env vars only.
+  # Thresholds mirror AEGIVIS_SECURITY_INJECTION_BLOCK_THRESHOLD and
+  # AEGIVIS_SECURITY_INJECTION_ALERT_THRESHOLD.  Tune via env vars only.
 
   - name: prompt-injection-block
     event_types: ["LLM_CALL_START"]
@@ -161,7 +161,7 @@ rules:
   # -- Security: RCE detection (Phase 3.1) -----------------------------------
   # Fires when an agent's tool call arguments contain code that would execute
   # OS commands, shell pipelines, or dangerous Python / SQL constructs.
-  # Threshold mirrors ABB_SECURITY_RCE_CONFIDENCE_THRESHOLD (default 0.70).
+  # Threshold mirrors AEGIVIS_SECURITY_RCE_CONFIDENCE_THRESHOLD (default 0.70).
 
   - name: rce-in-tool-args
     event_types: ["TOOL_CALL_START"]
@@ -179,7 +179,7 @@ rules:
   # only — enterprise agents legitimately call internal APIs on 10.x.x.x).
   #
   # To allow internal API calls, set:
-  #   ABB_SECURITY_SSRF_ALLOWED_DOMAINS=myapi.internal,10.0.0.5
+  #   AEGIVIS_SECURITY_SSRF_ALLOWED_DOMAINS=myapi.internal,10.0.0.5
   # To downgrade private-IP detection to LOG, change the action below.
 
   - name: ssrf-cloud-metadata-block
@@ -202,7 +202,7 @@ rules:
         op: neq
         value: "cloud_metadata"
     action: ALERT
-    reason: "Tool call targets a private/internal network address. Review access — set ABB_SECURITY_SSRF_ALLOWED_DOMAINS to allow known internal APIs."
+    reason: "Tool call targets a private/internal network address. Review access — set AEGIVIS_SECURITY_SSRF_ALLOWED_DOMAINS to allow known internal APIs."
     enabled: true
 
   # ── Context-aware multi-turn injection detection ──────────────────────────
@@ -228,21 +228,36 @@ rules:
     reason: "Elevated injection signal sustained across multiple turns — possible gradual injection buildup."
     enabled: true
 
+  # ── DIRECTLY-FIRED RULES (enabled: false) ─────────────────────────────────
+  # The rules below have `enabled: false` which means the policy engine DOES NOT
+  # evaluate their conditions. Instead, intercept.py fires them directly when
+  # the relevant invariant is violated. They appear here for documentation,
+  # hot-reload tracking, and to allow custom-action overrides in derived configs.
+  #
+  # Directly-fired rule index:
+  #   token-budget-exceeded        — state.total_tokens >= cap
+  #   llm-call-budget-exceeded     — state.llm_call_count >= cap
+  #   system-prompt-mutation       — system prompt hash changes mid-session
+  #   spawn-depth-exceeded         — spawn_depth > AEGIVIS_MAX_SPAWN_DEPTH
+  #   egress-destination-not-allowed — tool call network destination not allowlisted
+  #   ifc-external-to-sink         — EXTERNAL label flows to privileged sink arg
+  #   data-flow-graph-violation    — Session PDG detects multi-hop exfil chain
+  #
   # ── Token budget enforcement ──────────────────────────────────────────────
-  # Set ABB_RATE_LIMIT_MAX_TOKENS_PER_SESSION to a non-zero value to activate.
+  # Set AEGIVIS_RATE_LIMIT_MAX_TOKENS_PER_SESSION to a non-zero value to activate.
   # Fired by intercept.py directly when state.total_tokens >= cap.
   - name: token-budget-exceeded
     event_types: ["LLM_CALL_START"]
     conditions: []
     action: BLOCK
-    reason: "Session token budget exhausted — configure ABB_RATE_LIMIT_MAX_TOKENS_PER_SESSION to set the cap."
+    reason: "Session token budget exhausted — configure AEGIVIS_RATE_LIMIT_MAX_TOKENS_PER_SESSION to set the cap."
     enabled: false  # fired directly by intercept.py when cap > 0; empty conditions would match every call
 
   - name: llm-call-budget-exceeded
     event_types: ["LLM_CALL_START"]
     conditions: []
     action: BLOCK
-    reason: "Session LLM call budget exhausted — configure ABB_RATE_LIMIT_MAX_LLM_CALLS_PER_SESSION to set the cap."
+    reason: "Session LLM call budget exhausted — configure AEGIVIS_RATE_LIMIT_MAX_LLM_CALLS_PER_SESSION to set the cap."
     enabled: false  # fired directly by intercept.py when cap > 0; empty conditions would match every call
 
   # ── System prompt integrity (Phase 6) ─────────────────────────────────────
@@ -256,12 +271,50 @@ rules:
     enabled: false  # fired directly by intercept.py; conditions not evaluated by policy engine
 
   # ── Multi-agent spawn depth enforcement (Phase 6) ─────────────────────────
-  # Fired directly by intercept.py when spawn_depth > ABB_MAX_SPAWN_DEPTH.
-  # To change the limit: set ABB_MAX_SPAWN_DEPTH env var (default: 10).
-  # To disable: set ABB_MAX_SPAWN_DEPTH=0.
+  # Fired directly by intercept.py when spawn_depth > AEGIVIS_MAX_SPAWN_DEPTH.
+  # To change the limit: set AEGIVIS_MAX_SPAWN_DEPTH env var (default: 10).
+  # To disable: set AEGIVIS_MAX_SPAWN_DEPTH=0.
   - name: spawn-depth-exceeded
     event_types: ["LLM_CALL_START"]
     conditions: []
     action: BLOCK
     reason: "Agent spawn depth limit exceeded — possible runaway delegation chain or compromised orchestrator."
-    enabled: false  # fired directly by intercept.py; depth configured via ABB_MAX_SPAWN_DEPTH
+    enabled: false  # fired directly by intercept.py; depth configured via AEGIVIS_MAX_SPAWN_DEPTH
+
+  # ── Hard Egress Enforcement (Phase 13) ────────────────────────────────────
+  # Fired directly by intercept.py when a tool call's network destination
+  # (url, endpoint, webhook_url, host, etc.) is not in the operator's
+  # approved allowlist. Configure with AEGIVIS_SECURITY_EGRESS_ALLOWLIST.
+  # Mode: AEGIVIS_SECURITY_EGRESS_MODE=allowlist (block) | audit (alert) | off.
+  - name: egress-destination-not-allowed
+    event_types: ["TOOL_CALL_START"]
+    conditions: []
+    action: BLOCK
+    reason: "Tool call targets a network destination not in the approved allowlist. Configure AEGIVIS_SECURITY_EGRESS_ALLOWLIST to permit known endpoints."
+    enabled: false  # fired directly by intercept.py; conditions not evaluated by policy engine
+
+  # ── IFC Label System (Phase 11) ──────────────────────────────────────────
+  # Fired directly by intercept.py Hook 3-IFC when EXTERNAL-labeled content
+  # flows into a privileged sink argument (url, to, command, path, etc.).
+  # Deterministic: no ML, no heuristics — pure label propagation math.
+  # Action (BLOCK or ALERT) controlled by AEGIVIS_SECURITY_IFC_BLOCK env var.
+  # To change extra sink keys: AEGIVIS_SECURITY_IFC_EXTRA_SINK_KEYS=key1,key2
+  - name: ifc-external-to-sink
+    event_types: ["TOOL_CALL_START"]
+    conditions: []
+    action: BLOCK
+    reason: "IFC: EXTERNAL-labeled content (from web/email/tool result) flowed into a privileged sink argument. Possible injection-driven exfiltration blocked."
+    enabled: false  # fired directly by intercept.py Hook 3-IFC; conditions not evaluated by policy engine
+
+  # ── Session PDG — multi-hop data exfil detection (Phase 10) ───────────────
+  # Fired directly by intercept.py Hook C when the Session Program Dependence
+  # Graph detects that content from an UNTRUSTED source (web_search, email_read,
+  # fetch, etc.) is propagated into a sensitive sink argument in a subsequent
+  # tool call. Action controlled by AEGIVIS_SECURITY_PDG_ACTION env var.
+  # Mode: AEGIVIS_SECURITY_PDG_ACTION=alert (default) | block.
+  - name: data-flow-graph-violation
+    event_types: ["TOOL_CALL_START"]
+    conditions: []
+    action: ALERT
+    reason: "Session PDG detected a multi-hop data flow from an untrusted source to a sensitive sink — possible injection-driven exfiltration."
+    enabled: false  # fired directly by intercept.py Hook C; conditions not evaluated by policy engine

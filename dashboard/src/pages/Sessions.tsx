@@ -2,8 +2,8 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { formatDistanceToNow } from "date-fns";
-import { RefreshCw, Search, Bot, Cpu, AlertCircle } from "lucide-react";
-import { listSessions } from "../api/client";
+import { RefreshCw, Bot, AlertCircle } from "lucide-react";
+import { listSessions, listAgents } from "../api/client";
 import type { Session } from "../types/events";
 import { HashBadge } from "../components/HashBadge";
 import { LiveAlertFeed } from "../components/LiveAlertFeed";
@@ -31,6 +31,13 @@ export function Sessions() {
   const [providerFilter, setProviderFilter] = useState("");
   const [page, setPage] = useState(0);
   const PAGE_SIZE = 50;
+
+  const agentsQ = useQuery({
+    queryKey: ["agents"],
+    queryFn: listAgents,
+    staleTime: 60_000,
+  });
+  const agentOptions = agentsQ.data?.agents.map((a) => a.agent_id) ?? [];
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ["sessions", agentFilter, providerFilter, page],
@@ -72,14 +79,17 @@ export function Sessions() {
       {/* Filters */}
       <div className="flex gap-3 mb-4 flex-wrap">
         <div className="flex items-center gap-2 bg-white border rounded-lg px-3 py-2 shadow-sm">
-          <Search size={14} className="text-gray-400" />
-          <input
-            type="text"
-            placeholder="Filter by agent ID…"
+          <Bot size={14} className="text-gray-400" />
+          <select
             value={agentFilter}
             onChange={(e) => { setAgentFilter(e.target.value); setPage(0); }}
-            className="text-sm outline-none w-48"
-          />
+            className="text-sm outline-none w-48 text-gray-700 bg-white"
+          >
+            <option value="">All agents</option>
+            {agentOptions.map((id) => (
+              <option key={id} value={id}>{id}</option>
+            ))}
+          </select>
         </div>
         <select
           value={providerFilter}

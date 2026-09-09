@@ -6,7 +6,7 @@ Initializes OTel tracer for the proxy service.
 Exports spans to an OTLP endpoint (default: Jaeger on localhost:4317).
 
 Optional dependency: opentelemetry-sdk, opentelemetry-api, opentelemetry-exporter-otlp-proto-grpc
-Install: pip install 'agentblackbox-proxy[observability]'
+Install: pip install 'aegivis-proxy[observability]'
 
 If opentelemetry packages are not installed, get_tracer() returns a no-op
 tracer and all span operations are zero-cost.
@@ -22,7 +22,7 @@ _tracer_provider = None
 
 
 def setup_tracing(
-    service_name: str = "agentblackbox-proxy",
+    service_name: str = "aegivis-proxy",
     endpoint: str = "http://localhost:4317",
 ) -> bool:
     """
@@ -65,7 +65,7 @@ def setup_tracing(
     except ImportError:
         logger.info(
             "opentelemetry packages not installed -- tracing disabled. "
-            "Install with: pip install 'agentblackbox-proxy[observability]'"
+            "Install with: pip install 'aegivis-proxy[observability]'"
         )
         return False
     except Exception as exc:
@@ -73,7 +73,7 @@ def setup_tracing(
         return False
 
 
-def get_tracer(name: str = "agentblackbox"):
+def get_tracer(name: str = "aegivis"):
     """
     Return a tracer instance.
 

@@ -1,4 +1,4 @@
-# AgentBlackBox — full stack in one command:
+# Aegivis — full stack in one command:
 #   docker compose up -d
 #
 # Services:
@@ -10,19 +10,19 @@
 #
 # Multi-org setup (add a second org after running migrations):
 #
-#   docker exec abb-postgres psql -U abb -d agentblackbox -c \
+#   docker exec aegivis-postgres psql -U abb -d agentblackbox -c \
 #     "INSERT INTO api_keys (org_id, key_hash, name)
 #      VALUES ('acme-corp', encode(sha256('acme-secret-key'::bytea),'hex'), 'Acme Corp');"
 #
 # Then configure your proxy and dashboard for acme-corp:
-#   ABB_BACKEND_API_KEY=acme-secret-key  (proxy)
+#   AEGIVIS_BACKEND_API_KEY=acme-secret-key  (proxy)
 #   VITE_API_KEY=acme-secret-key         (dashboard)
 
 services:
   # ─── TimescaleDB (PostgreSQL 16 + time-series extension) ───────────────────
   postgres:
     image: timescale/timescaledb:latest-pg16   # drop-in replacement for postgres:16-alpine
-    container_name: abb-postgres
+    container_name: aegivis-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: abb
@@ -41,7 +41,7 @@ services:
   # ─── Redis (session state + event streaming) ──────────────────────────────
   redis:
     image: redis:7-alpine
-    container_name: abb-redis
+    container_name: aegivis-redis
     restart: unless-stopped
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
     ports:
@@ -59,16 +59,16 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: abb-backend
+    container_name: aegivis-backend
     restart: unless-stopped
     environment:
-      ABB_DATABASE_URL: postgresql+asyncpg://abb:abb@postgres:5432/agentblackbox
-      ABB_API_KEYS: '["dev-proxy-key", "dev-dashboard-key"]'
-      ABB_CORS_ORIGINS: '["http://localhost:5173", "http://dashboard:5173"]'
-      ABB_LOG_LEVEL: INFO
-      ABB_DEBUG: "false"
+      AEGIVIS_DATABASE_URL: postgresql+asyncpg://abb:abb@postgres:5432/agentblackbox
+      AEGIVIS_API_KEYS: '["dev-proxy-key", "dev-dashboard-key"]'
+      AEGIVIS_CORS_ORIGINS: '["http://localhost:5173", "http://dashboard:5173"]'
+      AEGIVIS_LOG_LEVEL: INFO
+      AEGIVIS_DEBUG: "false"
       # Redis: enables stream consumer (proxy → Redis → backend)
-      ABB_REDIS_URL: "redis://redis:6379/0"
+      AEGIVIS_REDIS_URL: "redis://redis:6379/0"
     ports:
       - "8000:8000"
     depends_on:
@@ -89,32 +89,36 @@ services:
       dockerfile: Dockerfile
       args:
         BUILD_EXTRAS: ${PROXY_BUILD_EXTRAS:-pii,security,classifier,ml,benchmark}
-    container_name: abb-proxy
+    container_name: aegivis-proxy
     restart: unless-stopped
     environment:
-      ABB_BACKEND_URL: http://backend:8000
-      ABB_BACKEND_API_KEY: dev-proxy-key
-      ABB_ORG_ID: default-org
-      ABB_LOG_LEVEL: INFO
-      ABB_PII_ENABLED: "true"
-      ABB_OPENAI_UPSTREAM: https://api.openai.com
-      ABB_ANTHROPIC_UPSTREAM: https://api.anthropic.com
-      ABB_GOOGLE_UPSTREAM: https://generativelanguage.googleapis.com
-      ABB_OLLAMA_UPSTREAM: http://host.docker.internal:11434
+      AEGIVIS_BACKEND_URL: http://backend:8000
+      AEGIVIS_BACKEND_API_KEY: dev-proxy-key
+      AEGIVIS_ORG_ID: default-org
+      AEGIVIS_LOG_LEVEL: INFO
+      AEGIVIS_PII_ENABLED: "true"
+      AEGIVIS_OPENAI_UPSTREAM: https://api.openai.com
+      AEGIVIS_ANTHROPIC_UPSTREAM: https://api.anthropic.com
+      AEGIVIS_GOOGLE_UPSTREAM: https://generativelanguage.googleapis.com
+      AEGIVIS_OLLAMA_UPSTREAM: http://host.docker.internal:11434
       # Async ML classifier: runs DeBERTa in a background task (non-blocking, ~50ms).
       # Flags session for BLOCK at the NEXT LLM call. Zero hot-path latency cost.
-      ABB_ANALYSIS_CLASSIFIER_ENABLED: "true"
+      AEGIVIS_ANALYSIS_CLASSIFIER_ENABLED: "true"
       # Sync ML: runs DeBERTa inline on EVERY LLM call, adding ~50ms latency.
-      ABB_ANALYSIS_CLASSIFIER_SYNC_ENABLED: "true"
-      # Second sync classifier: adds PromptGuard-86M ensemble (~20ms extra).
-      ABB_ANALYSIS_CLASSIFIER_SECOND_ENABLED: "true"
+      AEGIVIS_ANALYSIS_CLASSIFIER_SYNC_ENABLED: "true"
+      # Second sync classifier: disabled (PG-86M was unreliable, caused FPR regression).
+      AEGIVIS_ANALYSIS_CLASSIFIER_SECOND_ENABLED: "false"
+      # Long-context classifier: off by default (no suitable model available).
+      AEGIVIS_ANALYSIS_CLASSIFIER_THIRD_ENABLED: "false"
       # Tool output ML scan: scans tool results through DeBERTa (~50ms/result).
-      ABB_SECURITY_TOOL_OUTPUT_ML_SCAN_ENABLED: "true"
+      AEGIVIS_SECURITY_TOOL_OUTPUT_ML_SCAN_ENABLED: "true"
       # Redis: enables distributed session state (multi-proxy) and stream pipeline
-      ABB_REDIS_URL: "redis://redis:6379/0"
+      AEGIVIS_REDIS_URL: "redis://redis:6379/0"
       # Pass API keys from your .env file — never hardcode them here
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # HuggingFace token — set in .env to enable gated models (WalledGuard, Prompt-Guard)
+      HF_TOKEN: ${HF_TOKEN:-}
       HF_HOME: /hf_cache
       HF_DATASETS_CACHE: /hf_cache/datasets
     volumes:
@@ -128,13 +132,18 @@ services:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
   # ─── Dashboard ────────────────────────────────────────────────────────────
   dashboard:
     build:
       context: ./dashboard
       dockerfile: Dockerfile
-    container_name: abb-dashboard
+    container_name: aegivis-dashboard
     restart: unless-stopped
     environment:
       VITE_BACKEND_URL: ""          # empty = use nginx proxy (same-origin)
@@ -142,14 +151,15 @@ services:
     ports:
       - "5173:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
   # ─── Monitoring Stack (opt-in) ───────────────────────────────────────────
   # Start with: docker compose --profile observability up -d
 
   prometheus:
     image: prom/prometheus:v2.53.0
-    container_name: abb-prometheus
+    container_name: aegivis-prometheus
     profiles: [observability]
     restart: unless-stopped
     volumes:
@@ -166,7 +176,7 @@ services:
 
   grafana:
     image: grafana/grafana:11.1.0
-    container_name: abb-grafana
+    container_name: aegivis-grafana
     profiles: [observability]
     restart: unless-stopped
     environment:
@@ -184,7 +194,7 @@ services:
 
   jaeger:
     image: jaegertracing/all-in-one:1.60
-    container_name: abb-jaeger
+    container_name: aegivis-jaeger
     profiles: [observability]
     restart: unless-stopped
     environment:
@@ -196,12 +206,12 @@ services:
 
 volumes:
   postgres_data:
-    name: abb-postgres-data
+    name: aegivis-postgres-data
   redis_data:
-    name: abb-redis-data
+    name: aegivis-redis-data
   hf_cache:
-    name: abb-hf-cache
+    name: aegivis-hf-cache
   prometheus_data:
-    name: abb-prometheus-data
+    name: aegivis-prometheus-data
   grafana_data:
-    name: abb-grafana-data
+    name: aegivis-grafana-data

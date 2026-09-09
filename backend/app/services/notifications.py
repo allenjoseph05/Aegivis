@@ -5,10 +5,10 @@ Routes policy violations and anomaly flags to configured channels based on
 severity, with anti-fatigue deduplication and per-rule cooldowns.
 
 Channels (all optional — disabled when env var not set):
-  1. Slack Block Kit       — ABB_SLACK_WEBHOOK_URL
-  2. SMTP email            — ABB_SMTP_HOST + ABB_SMTP_TO
-  3. PagerDuty Events v2   — ABB_PAGERDUTY_ROUTING_KEY
-  4. Generic webhook       — ABB_ALERT_WEBHOOK_URL
+  1. Slack Block Kit       — AEGIVIS_SLACK_WEBHOOK_URL
+  2. SMTP email            — AEGIVIS_SMTP_HOST + AEGIVIS_SMTP_TO
+  3. PagerDuty Events v2   — AEGIVIS_PAGERDUTY_ROUTING_KEY
+  4. Generic webhook       — AEGIVIS_ALERT_WEBHOOK_URL
 
 Severity tiers:
   CRITICAL — canary leakage, data-exfiltration, system-prompt-mutation
@@ -115,7 +115,7 @@ _SEVERITY_ORDER = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 
 
 def _severity_meets_minimum(severity: str) -> bool:
-    """Return True if severity >= configured minimum (ABB_ALERT_MIN_SEVERITY)."""
+    """Return True if severity >= configured minimum (AEGIVIS_ALERT_MIN_SEVERITY)."""
     min_sev = getattr(settings, "alert_min_severity", "MEDIUM").upper()
     return _SEVERITY_ORDER.get(severity, 0) >= _SEVERITY_ORDER.get(min_sev, 2)
 
@@ -212,7 +212,7 @@ def _slack_blocks(violation: dict, severity: str) -> dict:
                 {"type": "section", "text": {"type": "mrkdwn", "text": header_text}},
                 {"type": "section", "fields": fields},
                 {"type": "context", "elements": [
-                    {"type": "mrkdwn", "text": f"AgentBlackBox | ts={ts_ns}"}
+                    {"type": "mrkdwn", "text": f"Aegivis | ts={ts_ns}"}
                 ]},
             ],
         }]
@@ -227,9 +227,9 @@ def _email_body(violation: dict, severity: str) -> tuple[str, str]:
     agent   = violation.get("agent_id", "unknown")
     session = violation.get("session_id", "")
 
-    subject = f"[AgentBlackBox] {severity} — {action}: {rule}"
+    subject = f"[Aegivis] {severity} — {action}: {rule}"
     body = (
-        f"AgentBlackBox security event\n"
+        f"Aegivis security event\n"
         f"{'=' * 50}\n\n"
         f"Severity:   {severity}\n"
         f"Rule:       {rule}\n"
@@ -238,7 +238,7 @@ def _email_body(violation: dict, severity: str) -> tuple[str, str]:
         f"Session:    {session}\n"
         f"Reason:     {reason}\n\n"
         f"{'=' * 50}\n"
-        f"Review violations at your AgentBlackBox dashboard.\n"
+        f"Review violations at your Aegivis dashboard.\n"
     )
     return subject, body
 
@@ -272,7 +272,7 @@ def _pagerduty_payload(violation: dict, severity: str) -> dict:
         "payload": {
             "summary": f"[{action}] {rule} — agent {agent}",
             "severity": pd_severity,
-            "source": "agentblackbox-proxy",
+            "source": "aegivis-proxy",
             "component": rule,
             "group": agent,
             "class": action,
@@ -324,7 +324,7 @@ async def _send_email(violation: dict, severity: str) -> None:
         return
     try:
         subject, body = _email_body(violation, severity)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _smtp_send_sync, subject, body)
         logger.info("SMTP alert sent: rule=%s sev=%s", violation.get("rule_name"), severity)
     except Exception as e:
@@ -364,7 +364,7 @@ async def _send_webhook(violation: dict, severity: str) -> None:
         payload = {
             "severity": severity,
             "violation": violation,
-            "source": "agentblackbox",
+            "source": "aegivis",
         }
         headers = {"Content-Type": "application/json"}
         secret = getattr(settings, "alert_webhook_secret", "")
@@ -372,7 +372,7 @@ async def _send_webhook(violation: dict, severity: str) -> None:
             import hmac
             body_bytes = json.dumps(payload).encode()
             sig = hmac.new(secret.encode(), body_bytes, "sha256").hexdigest()
-            headers["X-ABB-Signature"] = f"sha256={sig}"
+            headers["X-Aegivis-Signature"] = f"sha256={sig}"
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(url, json=payload, headers=headers)
@@ -393,7 +393,43 @@ async def _send_webhook(violation: dict, severity: str) -> None:
 # Main dispatch entry point
 # ---------------------------------------------------------------------------
 
-async def dispatch_violation_alert(violation: dict) -> None:
+async def get_effective_config(org_id: str, db) -> dict:
+    """
+    Load org-specific settings from DB, merged with env-var defaults.
+
+    DB values win. Used by stream_consumer to respect per-org channel config.
+    """
+    try:
+        from sqlalchemy import text as _text
+        result = await db.execute(
+            _text("SELECT key, value FROM org_settings WHERE org_id = :org_id"),
+            {"org_id": org_id},
+        )
+        overrides: dict[str, str | None] = {r.key: r.value for r in result.mappings().all()}
+    except Exception as exc:
+        logger.debug("Could not load org_settings (table may not exist yet): %s", exc)
+        overrides = {}
+
+    def _ov(k: str, default: str = "") -> str:
+        v = overrides.get(k)
+        return v if v is not None else (getattr(settings, k, None) or default)
+
+    return {
+        "slack_webhook_url":     _ov("slack_webhook_url"),
+        "smtp_host":             _ov("smtp_host"),
+        "smtp_port":             int(_ov("smtp_port", str(getattr(settings, "smtp_port", 587)))),
+        "smtp_user":             _ov("smtp_user"),
+        "smtp_password":         _ov("smtp_password"),
+        "smtp_from":             _ov("smtp_from"),
+        "smtp_to":               _ov("smtp_to"),
+        "pagerduty_routing_key": _ov("pagerduty_routing_key"),
+        "alert_webhook_url":     _ov("alert_webhook_url"),
+        "alert_webhook_secret":  _ov("alert_webhook_secret"),
+        "alert_min_severity":    _ov("alert_min_severity", "MEDIUM"),
+    }
+
+
+async def dispatch_violation_alert(violation: dict, db=None) -> None:
     """
     Route a policy violation to all appropriate alert channels.
 
@@ -404,6 +440,9 @@ async def dispatch_violation_alert(violation: dict) -> None:
       HIGH     → Slack + email + PagerDuty
       MEDIUM   → Slack only
       LOW      → (no external channel — dashboard only)
+
+    If `db` is provided, per-org settings are loaded from the database
+    (org_settings table) and override env-var defaults.
     """
     severity = _classify_severity(violation)
 
@@ -460,7 +499,7 @@ async def notify_anomalies(
 ) -> None:
     """
     Send Slack Block Kit message for HIGH or CRITICAL anomaly flags.
-    Skips silently if ABB_SLACK_WEBHOOK_URL is not configured.
+    Skips silently if AEGIVIS_SLACK_WEBHOOK_URL is not configured.
     """
     if not settings.slack_webhook_url:
         return

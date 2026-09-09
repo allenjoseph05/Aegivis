@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 # Prefix makes the canary identifiable in logs without revealing its value.
 # The prefix alone is also scanned to catch partial matches.
-_PREFIX = "ABB_CVT"   # AgentBlackBox Canary Verification Token
+_PREFIX = "AEGIVIS_CVT"   # Aegivis Canary Verification Token
 
 
 def generate() -> str:
@@ -59,7 +59,7 @@ def generate() -> str:
     Generate a cryptographically secure canary token.
 
     Uses ``secrets.token_hex(32)`` — 256 bits of entropy from the OS CSPRNG.
-    Format: ``ABB_CVT_<64-hex-chars>``
+    Format: ``AEGIVIS_CVT_<64-hex-chars>``
     """
     return f"{_PREFIX}_{secrets.token_hex(32).upper()}"
 

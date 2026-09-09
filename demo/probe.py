@@ -1,11 +1,11 @@
 """
-AgentBlackBox Security Probe
+Aegivis Security Probe
 ============================
 Tests that the proxy correctly BLOCKS and ALERTs on known attack patterns.
 No API key required — blocked requests never reach Anthropic.
 
 Usage:
-    cd AgentBlackBox
+    cd Aegivis
     pip install httpx
     python demo/probe.py
 
@@ -26,7 +26,7 @@ HEADERS = {
     "anthropic-version":  "2023-06-01",
     "content-type":       "application/json",
     "accept-encoding":    "identity",   # avoid gzip so httpx doesn't need to decompress
-    "x-abb-agent-id":     AGENT_ID,
+    "x-aegivis-agent-id":     AGENT_ID,
 }
 
 MODEL = "claude-3-5-haiku-20241022"
@@ -35,7 +35,7 @@ MODEL = "claude-3-5-haiku-20241022"
 def send(messages: list[dict], session_id: str | None = None) -> httpx.Response:
     headers = dict(HEADERS)
     if session_id:
-        headers["x-abb-session-id"] = session_id
+        headers["x-aegivis-session-id"] = session_id
     body = {"model": MODEL, "max_tokens": 64, "messages": messages}
     with httpx.Client(timeout=15) as client:
         return client.post(f"{PROXY_URL}{ANTHROPIC_PATH}", headers=headers, json=body)
@@ -142,7 +142,7 @@ TEST_CASES = [
 
 
 def run_probe():
-    print("\nAgentBlackBox Security Probe")
+    print("\nAegivis Security Probe")
     print("=" * 55)
 
     if not check_proxy_up():

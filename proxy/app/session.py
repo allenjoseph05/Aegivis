@@ -2,15 +2,15 @@
 Session tracking: correlates multiple LLM calls into a single agent session.
 
 Priority for session resolution:
-1. Explicit X-ABB-Session-ID header -> use as-is
-2. X-ABB-Agent-ID header only -> auto-generate session ID per conversation
+1. Explicit X-Aegivis-Session-ID header -> use as-is
+2. X-Aegivis-Agent-ID header only -> auto-generate session ID per conversation
 3. Auto-detect from conversation structure:
    - New session: messages = [system?, user (first message)] with no prior assistant turns
    - Continuation: messages contain prior assistant messages -> same session
    - Key: SHA-256(first_user_message_content) as session anchor
 
 Persistence:
-  On shutdown, session state is written to a JSON file (abb_sessions.json by default).
+  On shutdown, session state is written to a JSON file (aegivis_sessions.json by default).
   On startup, it is reloaded so that long multi-call sessions survive proxy restarts.
   Sessions idle for > TTL (4 hours) are evicted from memory and not persisted.
 """
@@ -57,9 +57,31 @@ def _has_prior_assistant_turns(messages: list[dict]) -> bool:
 
 
 class SessionState:
-    """Mutable per-session state held in memory by the proxy."""
+    """Mutable per-session state held in memory by the proxy.
+
+    Slots are divided into two groups:
+    • **Persisted** — written to ``aegivis_sessions.json`` via ``to_dict()`` so that long
+      sessions survive proxy restarts.  The canonical set is ``SessionState.PERSISTED_SLOTS``.
+    • **Runtime-only** — ephemeral; re-initialised to zero/None/empty on every proxy start
+      (or on session reload via ``from_dict()``).  Includes lazy-init objects that hold
+      in-memory graphs and classifiers (TaintTracker, SessionPDG, IFCContext).
+
+    Adding a new persisted field requires updating *both* ``to_dict()`` and ``from_dict()``;
+    the test ``test_session.py::test_to_dict_key_set`` will catch any mismatch.
+    """
+
+    # ── Persisted field names (must stay in sync with to_dict / from_dict) ─────
+    PERSISTED_SLOTS: frozenset[str] = frozenset({
+        "session_id", "agent_id", "sequence_number", "last_hash",
+        "llm_call_count", "tool_call_count", "pending_tool_calls",
+        "started_at_ns", "last_seen_ns", "first_user_hash",
+        "max_injection_score", "total_tokens", "error_count",
+        "system_prompt_hash",
+        "parent_agent_id", "parent_session_id", "spawn_depth",
+    })
 
     __slots__ = (
+        # ── Persisted ─────────────────────────────────────────────────────────
         "session_id",
         "agent_id",
         "sequence_number",
@@ -70,27 +92,26 @@ class SessionState:
         "started_at_ns",
         "last_seen_ns",
         "first_user_hash",
-        "active_canaries",          # dict[run_id -> canary_token]: cleared after each response
-        "event_type_sequence",      # list[str]: event types for Markov model (not persisted)
-        "max_injection_score",      # float: max injection score seen this session (persisted)
-        "injection_score_history",  # list[float]: rolling per-turn injection scores (not persisted)
-        "ml_injection_flag",        # bool: async ML classifier detected injection in previous turn (not persisted)
-        "ml_injection_score",       # float: ML classifier score that set the flag (not persisted)
-        "total_tokens",             # int: cumulative token usage this session (persisted)
-        "error_count",              # int: count of SYSTEM_ERROR events, used by Isolation Forest
-        # ── System prompt integrity (Phase 6) ─────────────────────────────────
-        "system_prompt_hash",       # str | None: SHA-256[:16] of first system prompt seen (persisted)
-        # ── Multi-agent spawn chain (Phase 6) ──────────────────────────────────
-        "parent_agent_id",          # str | None: agent_id of spawning agent (persisted)
-        "parent_session_id",        # str | None: session_id of spawning agent (persisted)
-        "spawn_depth",              # int: 0 = root agent, N = Nth level of delegation (persisted)
-        # ── Data flow taint tracking (Phase 8) ─────────────────────────────────
-        "taint_tracker",            # TaintTracker | None: per-session credential taint store (not persisted)
-        # ── Trust propagation (Phase 9C) ───────────────────────────────────────
-        "trust_score",              # float: 0.0–1.0 trust score; degraded by violations (not persisted — resets on restart)
-        # ── Tool baseline enforcement ───────────────────────────────────────────
-        "tools_hash",               # str | None: SHA-256[:16] of tools[] from first call; not persisted
-        "tools_set",                # frozenset[str] | None: tool names from first call; not persisted
+        "max_injection_score",      # float: max injection score seen this session
+        "total_tokens",             # int: cumulative token usage this session
+        "error_count",              # int: count of SYSTEM_ERROR events (Isolation Forest)
+        "system_prompt_hash",       # str | None: SHA-256[:16] of first system prompt (Phase 6)
+        "parent_agent_id",          # str | None: agent_id of spawning agent (Phase 6)
+        "parent_session_id",        # str | None: session_id of spawning agent (Phase 6)
+        "spawn_depth",              # int: 0 = root agent, N = Nth delegation level (Phase 6)
+        # ── Runtime-only (not persisted; reset to defaults on proxy restart) ──
+        "active_canaries",          # dict[run_id → canary_token]: cleared after each response
+        "event_type_sequence",      # list[str]: event types for Markov model
+        "injection_score_history",  # list[float]: rolling per-turn injection scores
+        "ml_injection_flag",        # bool: async ML classifier detected injection in prev turn
+        "ml_injection_score",       # float: ML classifier score that set the flag
+        "taint_tracker",            # TaintTracker | None: credential taint store (Phase 8)
+        "pdg",                      # SessionPDG | None: data-flow graph (Phase 10)
+        "ifc_context",              # IFCContext | None: IFC label store (Phase 11)
+        "trust_score",              # float: 0.0–1.0; degraded by violations (Phase 9C)
+        "hitl_pending_approval_id", # str | None: HITL approval UUID (Phase 9)
+        "tools_hash",               # str | None: SHA-256[:16] of tools[] from first call
+        "tools_set",                # frozenset[str] | None: tool names from first call
     )
 
     def __init__(
@@ -126,7 +147,10 @@ class SessionState:
         self.parent_session_id: str | None = parent_session_id
         self.spawn_depth: int = spawn_depth
         self.taint_tracker = None                            # Phase 8; lazy-init TaintTracker; not persisted
+        self.pdg = None                                      # Phase 10; lazy-init SessionPDG; not persisted
+        self.ifc_context = None                              # Phase 11; lazy-init IFCContext; not persisted
         self.trust_score: float = 1.0                       # Phase 9C; starts fully trusted; not persisted
+        self.hitl_pending_approval_id: str | None = None   # Phase 9; HITL approval UUID; not persisted
         self.tools_hash: str | None = None                  # tool baseline; hash of tools[] from first call
         self.tools_set: frozenset[str] | None = None        # tool baseline; names from first call
 
@@ -176,10 +200,13 @@ class SessionState:
         obj.parent_agent_id         = data.get("parent_agent_id")
         obj.parent_session_id       = data.get("parent_session_id")
         obj.spawn_depth             = data.get("spawn_depth", 0)
-        obj.taint_tracker           = None   # not persisted; recreated lazily
-        obj.trust_score             = 1.0   # not persisted; resets on proxy restart
-        obj.tools_hash              = None  # not persisted
-        obj.tools_set               = None  # not persisted
+        obj.taint_tracker               = None   # not persisted; recreated lazily
+        obj.pdg                         = None   # not persisted; recreated lazily (Phase 10)
+        obj.ifc_context                 = None  # not persisted; recreated lazily (Phase 11)
+        obj.trust_score                 = 1.0   # not persisted; resets on proxy restart
+        obj.hitl_pending_approval_id    = None  # not persisted; ephemeral per-call
+        obj.tools_hash                  = None  # not persisted
+        obj.tools_set                   = None  # not persisted
         return obj
 
     def get_taint_tracker(self) -> "TaintTracker":
@@ -188,6 +215,20 @@ class SessionState:
             from .security.taint_tracker import TaintTracker
             self.taint_tracker = TaintTracker()
         return self.taint_tracker
+
+    def get_pdg(self) -> "SessionPDG":
+        """Return the session's SessionPDG, creating it on first access."""
+        if self.pdg is None:
+            from .security.session_pdg import SessionPDG
+            self.pdg = SessionPDG()
+        return self.pdg
+
+    def get_ifc_context(self) -> "IFCContext":
+        """Return the session's IFCContext, creating it on first access."""
+        if self.ifc_context is None:
+            from .security.ifc_labels import IFCContext
+            self.ifc_context = IFCContext()
+        return self.ifc_context
 
 
 class SessionTracker:
@@ -300,7 +341,12 @@ class SessionTracker:
         has_prior = _has_prior_assistant_turns(messages)
 
         if has_prior and fuh and fuh in self._first_user_hash_index:
-            # Continuation of existing session
+            # Continuation of existing session.
+            # Tie-breaking: _first_user_hash_index maps fuh → session_id and stores
+            # only one entry per fuh (the most recently created session for that hash).
+            # Concurrent agents that start with the same first user message will
+            # therefore share the last-created session, which is intentional —
+            # the session represents a conversation identity, not a parallel run.
             session_id = self._first_user_hash_index[fuh]
             if session_id in self._sessions:
                 self._sessions[session_id].last_seen_ns = time.time_ns()
@@ -314,6 +360,7 @@ class SessionTracker:
             parent_session_id=parent_session_id,
         )
         if fuh:
+            # Register fuh → session_id; overwrites any prior mapping for this hash
             self._first_user_hash_index[fuh] = session_id
         return session_id
 
@@ -402,7 +449,7 @@ async def get_tracker() -> "SessionTracker":
     """
     Return the best available tracker.
 
-    If ABB_REDIS_URL is set:  RedisSessionTracker (state shared across proxies).
+    If AEGIVIS_REDIS_URL is set:  RedisSessionTracker (state shared across proxies).
     Otherwise:                 in-memory SessionTracker (default).
     """
     from .config import settings

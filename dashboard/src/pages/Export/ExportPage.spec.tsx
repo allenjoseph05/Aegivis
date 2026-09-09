@@ -17,6 +17,9 @@ import { ExportPage } from "./ExportPage";
 vi.mock("../../api/client", () => ({
   pushToSplunk: vi.fn(),
   pushToElasticsearch: vi.fn(),
+  // Constants used by JsonLinesTab
+  BASE_URL: "http://localhost:8000",
+  API_KEY: "dev-dashboard-key",
 }));
 
 import { pushToSplunk, pushToElasticsearch } from "../../api/client";
@@ -47,7 +50,7 @@ describe("ExportPage", () => {
 
   it("renders page title", () => {
     renderPage();
-    expect(screen.getByText("SIEM Export")).toBeInTheDocument();
+    expect(screen.getByText("Export & Compliance")).toBeInTheDocument();
   });
 
   it("renders three tabs", () => {

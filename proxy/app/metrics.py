@@ -4,16 +4,16 @@ Prometheus Metrics — Phase 3.4
 Exposes an ASGI metrics endpoint at /metrics for Prometheus scraping.
 
 Metrics exported:
-  abb_requests_total          -- LLM proxy requests by provider and status
-  abb_violations_total        -- Policy/security violations by rule and action
-  abb_security_scans_total    -- Security scan invocations by scanner name
-  abb_events_enqueued_total   -- Events enqueued for backend by event_type
-  abb_llm_latency_ms          -- LLM call latency histogram by provider/model
-  abb_security_scan_ms        -- Security scan duration histogram by scanner
-  abb_active_sessions         -- Current active sessions gauge
+  aegivis_requests_total          -- LLM proxy requests by provider and status
+  aegivis_violations_total        -- Policy/security violations by rule and action
+  aegivis_security_scans_total    -- Security scan invocations by scanner name
+  aegivis_events_enqueued_total   -- Events enqueued for backend by event_type
+  aegivis_llm_latency_ms          -- LLM call latency histogram by provider/model
+  aegivis_security_scan_ms        -- Security scan duration histogram by scanner
+  aegivis_active_sessions         -- Current active sessions gauge
 
 Optional dependency: prometheus-client>=0.21.0
-Install: pip install 'agentblackbox-proxy[observability]'
+Install: pip install 'aegivis-proxy[observability]'
 
 If prometheus-client is not installed, all operations are no-ops and
 get_metrics_app() returns None.
@@ -65,35 +65,35 @@ def _init_metrics():
         _registry = CollectorRegistry()
 
         requests_total = Counter(
-            "abb_requests_total",
+            "aegivis_requests_total",
             "Total LLM proxy requests",
             ["provider", "status"],
             registry=_registry,
         )
 
         violations_total = Counter(
-            "abb_violations_total",
+            "aegivis_violations_total",
             "Total policy and security violations",
             ["rule_name", "action"],
             registry=_registry,
         )
 
         security_scans_total = Counter(
-            "abb_security_scans_total",
+            "aegivis_security_scans_total",
             "Total security scan invocations",
             ["scanner"],
             registry=_registry,
         )
 
         events_enqueued_total = Counter(
-            "abb_events_enqueued_total",
+            "aegivis_events_enqueued_total",
             "Total events enqueued for backend",
             ["event_type"],
             registry=_registry,
         )
 
         llm_latency_ms = Histogram(
-            "abb_llm_latency_ms",
+            "aegivis_llm_latency_ms",
             "LLM call latency in milliseconds",
             ["provider", "model"],
             buckets=[50, 100, 250, 500, 1000, 2500, 5000, 10000],
@@ -101,7 +101,7 @@ def _init_metrics():
         )
 
         security_scan_ms = Histogram(
-            "abb_security_scan_duration_ms",
+            "aegivis_security_scan_duration_ms",
             "Security scan duration in milliseconds",
             ["scanner"],
             buckets=[1, 5, 10, 25, 50, 100, 250, 500],
@@ -109,7 +109,7 @@ def _init_metrics():
         )
 
         active_sessions = Gauge(
-            "abb_active_sessions",
+            "aegivis_active_sessions",
             "Number of currently active agent sessions",
             registry=_registry,
         )
@@ -120,7 +120,7 @@ def _init_metrics():
     except ImportError:
         logger.info(
             "prometheus-client not installed -- metrics endpoint disabled. "
-            "Install with: pip install 'agentblackbox-proxy[observability]'"
+            "Install with: pip install 'aegivis-proxy[observability]'"
         )
     except Exception as exc:
         logger.warning("Failed to initialize Prometheus metrics: %s", exc)

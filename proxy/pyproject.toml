@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agentblackbox-proxy"
+name = "aegivis-proxy"
 version = "1.0.0"
-description = "AgentBlackBox LLM Proxy — transparent forensic interception for any AI agent"
+description = "Aegivis LLM Proxy — transparent forensic interception for any AI agent"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 keywords = ["ai", "audit", "compliance", "proxy", "llm", "forensics"]
@@ -71,7 +71,7 @@ benchmark = [
 ]
 redis = [
     # Distributed session state (multi-proxy) + Redis Streams event pipeline.
-    # Install with: pip install 'agentblackbox-proxy[redis]'
+    # Install with: pip install 'aegivis-proxy[redis]'
     "redis[asyncio]>=5.0",
 ]
 dev = [
@@ -82,7 +82,7 @@ dev = [
 ]
 
 [project.scripts]
-abb-proxy = "proxy.app.main:app"
+aegivis-proxy = "proxy.app.main:app"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

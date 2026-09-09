@@ -71,7 +71,7 @@ class _IsolationForestModel:
                 self._sklearn_available = False
                 logger.info(
                     "scikit-learn not installed -- Isolation Forest disabled. "
-                    "Install with: pip install 'agentblackbox-proxy[ml]'"
+                    "Install with: pip install 'aegivis-proxy[ml]'"
                 )
         return self._sklearn_available
 

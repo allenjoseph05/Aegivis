@@ -50,10 +50,10 @@ class EventTransport:
             },
         )
         self._running = True
-        self._flush_task = asyncio.create_task(self._flush_loop(), name="abb-transport-flush")
+        self._flush_task = asyncio.create_task(self._flush_loop(), name="aegivis-transport-flush")
 
         if self._buffer:
-            self._retry_task = asyncio.create_task(self._retry_loop(), name="abb-buffer-retry")
+            self._retry_task = asyncio.create_task(self._retry_loop(), name="aegivis-buffer-retry")
             sizes = self._buffer.size()
             if sizes["events"] > 0 or sizes["violations"] > 0:
                 logger.info(
@@ -289,7 +289,7 @@ async def get_best_transport() -> "EventTransport":
     """
     Return the best available transport.
 
-    If ABB_REDIS_URL is set:  RedisTransport (publishes to Redis Streams).
+    If AEGIVIS_REDIS_URL is set:  RedisTransport (publishes to Redis Streams).
     Otherwise:                 EventTransport (HTTP batches to backend).
     """
     if settings.redis_url:

@@ -4,7 +4,6 @@ GET /v1/anomalies - Query persisted anomaly detections.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,10 +21,10 @@ router = APIRouter()
     summary="List detected anomalies",
 )
 async def list_anomalies(
-    session_id: Optional[str] = Query(None),
-    agent_id: Optional[str] = Query(None),
-    severity: Optional[str] = Query(None),
-    rule_id: Optional[str] = Query(None),
+    session_id: str | None = Query(None),
+    agent_id: str | None = Query(None),
+    severity: str | None = Query(None),
+    rule_id: str | None = Query(None),
     limit: int = Query(100, le=500),
     offset: int = Query(0),
     db: AsyncSession = Depends(get_session),

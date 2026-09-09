@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class ProxySettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="ABB_", case_sensitive=False)
+    model_config = SettingsConfigDict(env_prefix="AEGIVIS_", case_sensitive=False)
 
     # Backend ingestion endpoint
     backend_url: str = "http://localhost:8000"
@@ -17,6 +17,9 @@ class ProxySettings(BaseSettings):
     # Proxy server
     host: str = "0.0.0.0"
     port: int = 8080
+    # CORS — locked to dashboard origins by default.
+    # Override in production: AEGIVIS_CORS_ORIGINS=https://yourdomain.com
+    cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 
     # Real LLM provider URLs (defaults are the public APIs)
     openai_upstream: str = "https://api.openai.com"
@@ -50,9 +53,9 @@ class ProxySettings(BaseSettings):
     tool_permissions_yaml: str = ""
 
     # Agent identity
-    # Comma-separated agent_id:key pairs. e.g. "my-agent:abb_abc123,other-agent:abb_def456"
+    # Comma-separated agent_id:key pairs. e.g. "my-agent:aegivis_abc123,other-agent:aegivis_def456"
     agent_keys: str = ""
-    # If true, requests without a valid X-ABB-Agent-Key are rejected with 401
+    # If true, requests without a valid X-Aegivis-Agent-Key are rejected with 401
     require_agent_key: bool = False
 
     # Violations reporting — send policy violations to backend
@@ -60,13 +63,13 @@ class ProxySettings(BaseSettings):
 
     # Reliability: local disk buffer when backend is unreachable
     # Path to a SQLite file used to persist unsent events. Empty = disabled.
-    buffer_db_path: str = "abb_buffer.db"   # relative to CWD; set "" to disable
+    buffer_db_path: str = "aegivis_buffer.db"   # relative to CWD; set "" to disable
     buffer_retry_interval_s: float = 30.0   # how often to retry flushing buffered events
     buffer_max_events: int = 50_000         # max events to buffer before dropping
 
     # Reliability: session state persistence across proxy restarts
     # Path to a JSON file for session state. Empty = disabled (in-memory only).
-    session_state_path: str = "abb_sessions.json"
+    session_state_path: str = "aegivis_sessions.json"
 
     # -------------------------------------------------------------------------
     # Security scanning
@@ -106,9 +109,9 @@ class ProxySettings(BaseSettings):
     # Management API authentication
     # -------------------------------------------------------------------------
     # When non-empty, all management endpoints (/policies/reload,
-    # /tool-permissions/reload) require this key in the X-ABB-Admin-Key header.
+    # /tool-permissions/reload) require this key in the X-Aegivis-Admin-Key header.
     # Set to a long random string in production.
-    # Example: ABB_ADMIN_API_KEY=$(openssl rand -hex 32)
+    # Example: AEGIVIS_ADMIN_API_KEY=$(openssl rand -hex 32)
     # Leave empty ("") to disable admin auth (suitable for local development).
     admin_api_key: str = ""
 
@@ -158,7 +161,7 @@ class ProxySettings(BaseSettings):
     security_unicode_stego_enabled: bool = True
 
     # Scan PDF and DOCX documents for hidden text layers, annotations, metadata
-    # injection, and macros. Requires: pip install 'agentblackbox-proxy[docs]'
+    # injection, and macros. Requires: pip install 'aegivis-proxy[docs]'
     # (pymupdf + python-docx). Gracefully disabled if deps not installed.
     security_document_scan_enabled: bool = True
 
@@ -193,7 +196,7 @@ class ProxySettings(BaseSettings):
     # Both modes can be active simultaneously — the async run is skipped when the
     # sync run already flagged the message (no double work).
     #
-    # Requires: pip install 'agentblackbox-proxy[classifier]'  (transformers + torch)
+    # Requires: pip install 'aegivis-proxy[classifier]'  (transformers + torch)
     analysis_classifier_enabled: bool = False       # async mode (background, next-call)
     analysis_classifier_sync_enabled: bool = False  # sync mode (inline, current call)
     # HuggingFace model ID for the injection classifier.
@@ -205,13 +208,14 @@ class ProxySettings(BaseSettings):
     # Scores >= threshold*0.6 => "suspicious" => ALERT violation only, flag NOT set.
     analysis_classifier_threshold: float = 0.85
 
+    # ── Fast sync classifier (hot-path, PG-2-22M) ────────────────────────────
     # ── Ensemble second classifier ────────────────────────────────────────────
     # When enabled, a second model runs alongside the primary classifier.
     # The ensemble rule is max(primary_score, secondary_score) — if either
     # fires, the injection is flagged.  Reduces FN from different blind spots.
     # meta-llama/Prompt-Guard-86M: RoBERTa-based, ~86MB, ~30ms CPU.
     # Different architecture + training data → catches what DeBERTa misses.
-    # Requires: pip install 'agentblackbox-proxy[classifier]' (same extra)
+    # Requires: pip install 'aegivis-proxy[classifier]' (same extra)
     analysis_classifier_second_enabled: bool = False
     analysis_classifier_second_model: str = "meta-llama/Prompt-Guard-86M"
 
@@ -247,6 +251,56 @@ class ProxySettings(BaseSettings):
     rate_limit_max_llm_calls_per_session: int = 0
 
     # -------------------------------------------------------------------------
+    # Capability Manifests (Phase 12)
+    # -------------------------------------------------------------------------
+    # HMAC-SHA256 signing key for capability manifests.
+    # Must match AEGIVIS_MANIFEST_SIGNING_KEY on the backend.
+    # If empty, signature verification is skipped (development mode).
+    manifest_signing_key: str = ""
+    # When true: BLOCK tool calls that violate the active manifest.
+    # When false: ALERT only (observe mode — for rollout testing).
+    manifest_enforce: bool = True
+    # Cache TTL (seconds) for manifest lookups. Manifests are re-fetched
+    # from the backend after this interval. Default: 5 minutes.
+    manifest_cache_ttl_s: float = 300.0
+
+    # -------------------------------------------------------------------------
+    # Hard Egress Enforcement (Phase 13)
+    # -------------------------------------------------------------------------
+    # Deterministic allowlist-based network destination checking.
+    # Replaces the probabilistic SSRF heuristic with a strict allowlist.
+    # Mode "allowlist": BLOCK any tool call whose network destination arg
+    #   (url, endpoint, webhook_url, host, etc.) is not in the allowlist.
+    # Mode "audit": log violations only, never block (for learning period).
+    # Mode "off": disabled entirely (fall back to SSRF heuristic only).
+    #
+    # Allowlist format (comma-separated):
+    #   api.openai.com          — exact hostname
+    #   *.anthropic.com         — wildcard subdomains
+    #   db.internal:5432        — hostname with port
+    #   10.0.0.0/8              — CIDR range
+    #
+    # Leave empty to run in audit mode (observes but does not block).
+    # Example: AEGIVIS_SECURITY_EGRESS_ALLOWLIST=api.openai.com,*.anthropic.com
+    security_egress_mode: str = "audit"   # "allowlist" | "audit" | "off"
+    security_egress_allowlist: str = ""   # comma-separated allowed destinations
+
+    # -------------------------------------------------------------------------
+    # IFC Label System (Phase 11)
+    # -------------------------------------------------------------------------
+    # Tracks data provenance labels (TRUSTED / EXTERNAL) across the session.
+    # When EXTERNAL-labeled content (from web search, email, fetch, etc.)
+    # flows into a privileged sink argument (url, to, command, path, etc.),
+    # the tool call is blocked. Deterministic — no ML, no heuristics.
+    security_ifc_enabled: bool = True
+    # When True: block the tool call on IFC violation. When False: alert only.
+    security_ifc_block: bool = True
+    # Comma-separated additional sink argument keys to treat as privileged.
+    # Default set covers url/to/command/path/webhook etc. Add custom keys here.
+    # Example: "target_email,output_path,sink_url"
+    security_ifc_extra_sink_keys: str = ""
+
+    # -------------------------------------------------------------------------
     # Data flow taint tracking (Phase 8)
     # -------------------------------------------------------------------------
     # Tags credentials the moment they enter agent context (system prompt or
@@ -260,7 +314,7 @@ class ProxySettings(BaseSettings):
     # -------------------------------------------------------------------------
     # Maximum allowed agent delegation depth.  0 = disabled.
     # Root agent = depth 0.  Agent spawned by root = depth 1.  etc.
-    # Set X-ABB-Parent-Agent-Id and X-ABB-Parent-Session-Id headers when
+    # Set X-Aegivis-Parent-Agent-Id and X-Aegivis-Parent-Session-Id headers when
     # spawning sub-agents so the proxy can track the chain.
     max_spawn_depth: int = 10
 
@@ -278,7 +332,7 @@ class ProxySettings(BaseSettings):
     # OTLP gRPC endpoint URL (Jaeger, Tempo, etc.)
     otel_endpoint: str = "http://localhost:4317"
     # Service name shown in trace UIs.
-    otel_service_name: str = "agentblackbox-proxy"
+    otel_service_name: str = "aegivis-proxy"
 
     # -------------------------------------------------------------------------
     # Redis (optional — enables distributed session state + stream pipeline)
@@ -308,9 +362,53 @@ class ProxySettings(BaseSettings):
     # re-fetching from the backend.  5 minutes is a good default.
     tool_baseline_cache_ttl_s: float = 300.0
 
+    # -------------------------------------------------------------------------
+    # Human-in-the-Loop (HITL) approvals (Phase 9)
+    # -------------------------------------------------------------------------
+    # When enabled, certain tool calls are paused and require a human reviewer
+    # to approve or deny before the agent may continue.
+    hitl_enabled: bool = False
+    # Comma-separated tool names that always require approval (exact match).
+    # Example: "bash,exec,shell,http_request"
+    hitl_required_tools: str = ""
+    # If enforcement score >= this threshold, the tool call requires approval.
+    hitl_score_threshold: float = 0.95
+    # Max seconds the proxy will wait for a decision before treating as denied.
+    hitl_timeout_seconds: int = 300
+    # Require approval when a network-sink tool receives tainted credentials.
+    hitl_on_network_sink: bool = True
+
+    # -------------------------------------------------------------------------
+    # Trust propagation (Phase 9)
+    # -------------------------------------------------------------------------
+    # When a child session's parent was compromised, automatically lower the
+    # child's ML classifier threshold so it is more sensitive to injection.
+    trust_propagation_enabled: bool = True
+    # Fraction to subtract from the classifier threshold for untrusted children.
+    # e.g. threshold=0.85, discount=0.20 → effective threshold=0.68
+    trust_propagation_discount: float = 0.20
+
+    # -------------------------------------------------------------------------
+    # Request body size limit
+    # -------------------------------------------------------------------------
+    # Reject requests whose body exceeds this size before any processing.
+    # Prevents memory exhaustion from very large payloads.
+    # Default: 10 MB. Set 0 to disable.
+    max_request_body_bytes: int = 10 * 1024 * 1024  # 10 MB
+
+    # -------------------------------------------------------------------------
+    # Reasoning trace (extended thinking capture)
+    # -------------------------------------------------------------------------
+    # Max characters to store per thinking block. Truncates before DB write.
+    reasoning_trace_max_chars: int = 4000
+
     # Logging
     log_level: str = "INFO"
     log_request_bodies: bool = False  # set True only in dev, never in prod
+
+    @property
+    def hitl_required_tools_set(self) -> frozenset:
+        return frozenset(t.strip() for t in self.hitl_required_tools.split(",") if t.strip())
 
 
 settings = ProxySettings()

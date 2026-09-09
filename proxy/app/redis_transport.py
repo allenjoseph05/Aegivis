@@ -19,8 +19,8 @@ EventTransport (HTTP) so no events are lost.
 
 Stream names
 ------------
-    abb:events      — audit events    (MAXLEN ~ 50 000)
-    abb:violations  — policy violations (MAXLEN ~ 10 000)
+    aegivis:events      — audit events    (MAXLEN ~ 50 000)
+    aegivis:violations  — policy violations (MAXLEN ~ 10 000)
 """
 from __future__ import annotations
 
@@ -34,8 +34,8 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
-_STREAM_EVENTS     = "abb:events"
-_STREAM_VIOLATIONS = "abb:violations"
+_STREAM_EVENTS     = "aegivis:events"
+_STREAM_VIOLATIONS = "aegivis:violations"
 _MAXLEN_EVENTS     = 50_000
 _MAXLEN_VIOLATIONS = 10_000
 

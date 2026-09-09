@@ -1,0 +1,86 @@
+groups:
+  - name: aegivis
+    interval: 30s
+    rules:
+
+      # ── Availability ──────────────────────────────────────────────────────────
+
+      - alert: AegivisProxyDown
+        expr: up{job="aegivis-proxy"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Aegivis Proxy unreachable"
+          description: >
+            Prometheus cannot scrape the proxy at {{ $labels.instance }}.
+            Agents may be unable to route LLM calls.
+
+      - alert: AegivisBackendDown
+        expr: up{job="aegivis-backend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Aegivis Backend unreachable"
+          description: >
+            Prometheus cannot scrape the backend at {{ $labels.instance }}.
+            Events are not being persisted; violations may be lost.
+
+      # ── Policy violations ─────────────────────────────────────────────────────
+
+      - alert: AegivisHighViolationRate
+        # More than 1 violation every 10 seconds (0.1/s) sustained for 5 minutes
+        expr: sum(rate(aegivis_violations_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High policy violation rate (>6/min)"
+          description: >
+            Violation rate is {{ $value | humanize }}/s over the last 5 minutes.
+            Check the Violations page for details.
+
+      - alert: AegivisBlockStorm
+        # More than 5 BLOCK violations per second — indicates active attack or misconfiguration
+        expr: sum(rate(aegivis_violations_total{action="BLOCK"}[1m])) > 5
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Sustained BLOCK storm (>5 blocks/sec)"
+          description: >
+            {{ $value | humanize }} BLOCK violations/sec over the last minute.
+            Possible active attack or overly strict policy — investigate immediately.
+
+      # ── Proxy errors ──────────────────────────────────────────────────────────
+
+      - alert: AegivisProxyHighErrorRate
+        # Proxy returning 5xx to agents at > 1% of requests
+        expr: >
+          sum(rate(aegivis_requests_total{status=~"5.."}[5m]))
+          /
+          sum(rate(aegivis_requests_total[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Proxy error rate > 1%"
+          description: >
+            {{ $value | humanizePercentage }} of proxy requests are returning 5xx.
+            Check proxy logs for upstream LLM provider errors or internal failures.
+
+      # ── Activity ──────────────────────────────────────────────────────────────
+
+      - alert: AegivisNoActiveSessions
+        # No agent traffic for 30+ minutes — may indicate agents stopped routing through proxy
+        expr: aegivis_active_sessions == 0
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "No active agent sessions"
+          description: >
+            No agent sessions have been active for 30 minutes.
+            Verify agents are still routing through the proxy
+            (OPENAI_BASE_URL=http://proxy:8080/openai, etc.).

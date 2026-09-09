@@ -2,7 +2,7 @@
 # Source: shared/schema/events.json
 # Regenerate: python shared/schema/generate.py
 from __future__ import annotations
-from typing import Any, List, Optional, Union
+from typing import Any
 from enum import Enum
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,75 +35,75 @@ class Provider(str, Enum):
 
 class Message(BaseModel):
     role: str
-    content: Optional[str] = None
-    tool_call_id: Optional[str] = None
-    name: Optional[str] = None
+    content: str | None = None
+    tool_call_id: str | None = None
+    name: str | None = None
 
 
 class ToolDefinition(BaseModel):
     name: str
-    description: Optional[str] = None
-    parameters: Optional[dict] = None
+    description: str | None = None
+    parameters: dict | None = None
 
 
 class ToolCall(BaseModel):
     id: str
     name: str
-    arguments: Union[str, dict]
+    arguments: str | dict
 
 
 class TokenUsage(BaseModel):
-    prompt_tokens: Optional[int] = None
-    completion_tokens: Optional[int] = None
-    total_tokens: Optional[int] = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 class LLMCallStartPayload(BaseModel):
-    messages: List[Message]
-    tools_available: List[ToolDefinition] = Field(default_factory=list)
-    temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
-    stream: Optional[bool] = None
-    extra_params: Optional[dict] = None
+    messages: list[Message]
+    tools_available: list[ToolDefinition] = Field(default_factory=list)
+    temperature: float | None = None
+    max_tokens: int | None = None
+    stream: bool | None = None
+    extra_params: dict | None = None
 
 
 class LLMCallEndPayload(BaseModel):
-    response_text: Optional[str] = None
-    finish_reason: Optional[str] = None
-    tool_calls: List[ToolCall] = Field(default_factory=list)
-    token_usage: Optional[TokenUsage] = None
-    latency_ms: Optional[float] = None
-    http_status: Optional[int] = None
+    response_text: str | None = None
+    finish_reason: str | None = None
+    tool_calls: list[ToolCall] = Field(default_factory=list)
+    token_usage: TokenUsage | None = None
+    latency_ms: float | None = None
+    http_status: int | None = None
 
 
 class ToolCallStartPayload(BaseModel):
     tool_name: str
-    tool_description: Optional[str] = None
-    tool_input: Optional[Union[dict, str]] = None
+    tool_description: str | None = None
+    tool_input: dict | str | None = None
     tool_call_id: str
 
 
 class ToolCallEndPayload(BaseModel):
     tool_name: str
     tool_call_id: str
-    tool_output_masked: Optional[str] = None
-    tool_output_hash: Optional[str] = None
-    pii_fields_detected: List[str] = Field(default_factory=list)
+    tool_output_masked: str | None = None
+    tool_output_hash: str | None = None
+    pii_fields_detected: list[str] = Field(default_factory=list)
     success: bool = True
 
 
 class AgentFinishPayload(BaseModel):
-    final_output: Optional[str] = None
+    final_output: str | None = None
     total_llm_calls: int = 0
     total_tool_calls: int = 0
-    session_duration_ms: Optional[float] = None
+    session_duration_ms: float | None = None
 
 
 class SystemErrorPayload(BaseModel):
-    error_code: Optional[Union[str, int]] = None
+    error_code: str | int | None = None
     error_message: str
     provider: str = "unknown"
-    http_status: Optional[int] = None
+    http_status: int | None = None
 
 
 class CheckpointPayload(BaseModel):
@@ -125,11 +125,11 @@ class AuditEvent(BaseModel):
     model: str
     interception_layer: InterceptionLayer = InterceptionLayer.PROXY
     run_id: str
-    parent_run_id: Optional[str] = None
+    parent_run_id: str | None = None
     event_type: EventType
     payload: dict
-    payload_hash: Optional[str] = None
-    pii_detected: List[str] = Field(default_factory=list)
+    payload_hash: str | None = None
+    pii_detected: list[str] = Field(default_factory=list)
     timestamp_ns: int
     sequence_number: int
     previous_hash: str
@@ -137,6 +137,6 @@ class AuditEvent(BaseModel):
 
 
 class EventBatch(BaseModel):
-    events: List[AuditEvent]
+    events: list[AuditEvent]
     batch_id: str
     sent_at_ns: int

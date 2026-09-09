@@ -1,13 +1,13 @@
 """
-Redis Streams consumer for the AgentBlackBox backend.
+Redis Streams consumer for the Aegivis backend.
 
 Reads audit events and policy violations from Redis Streams and persists
 them to PostgreSQL. Runs as background asyncio tasks in the backend process.
 
 Streams
 -------
-    abb:events      — audit events published by the proxy via RedisTransport
-    abb:violations  — policy violations published by the proxy via RedisTransport
+    aegivis:events      — audit events published by the proxy via RedisTransport
+    aegivis:violations  — policy violations published by the proxy via RedisTransport
 
 Consumer groups ensure at-least-once delivery:
 - Messages are ACKed only after a successful DB insert.
@@ -26,9 +26,9 @@ from ..db.queries import insert_event
 
 logger = logging.getLogger(__name__)
 
-_STREAM_EVENTS       = "abb:events"
-_STREAM_VIOLATIONS   = "abb:violations"
-_GROUP               = "abb-backend"
+_STREAM_EVENTS       = "aegivis:events"
+_STREAM_VIOLATIONS   = "aegivis:violations"
+_GROUP               = "aegivis-backend"
 _CONSUMER_EVENTS     = "backend-events-1"
 _CONSUMER_VIOLATIONS = "backend-violations-1"
 _BATCH_SIZE          = 50
@@ -49,7 +49,7 @@ async def _ensure_group(redis_client, stream: str, group: str) -> None:
 
 async def run_event_consumer(redis_client, session_factory: async_sessionmaker) -> None:
     """
-    Consume audit events from abb:events stream and persist to PostgreSQL.
+    Consume audit events from aegivis:events stream and persist to PostgreSQL.
     Runs until cancelled.
     """
     await _ensure_group(redis_client, _STREAM_EVENTS, _GROUP)
@@ -114,7 +114,7 @@ async def run_violation_consumer(
     redis_client, session_factory: async_sessionmaker
 ) -> None:
     """
-    Consume policy violations from abb:violations stream and persist to PostgreSQL.
+    Consume policy violations from aegivis:violations stream and persist to PostgreSQL.
     Runs until cancelled.
     """
     await _ensure_group(redis_client, _STREAM_VIOLATIONS, _GROUP)

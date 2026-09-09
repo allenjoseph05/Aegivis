@@ -17,6 +17,8 @@ import json
 import logging
 from typing import Any
 
+from ..config import settings
+
 logger = logging.getLogger(__name__)
 
 PROVIDER_NAME = "anthropic"
@@ -78,6 +80,7 @@ def parse_response(body: dict) -> dict:
     response_text = None
     tool_calls = []
 
+    thinking_blocks = []
     for block in (body.get("content") or []):
         if not isinstance(block, dict):
             continue
@@ -88,6 +91,11 @@ def parse_response(body: dict) -> dict:
                 "id": block.get("id", ""),
                 "name": block.get("name", ""),
                 "arguments": block.get("input", {}),
+            })
+        elif block.get("type") == "thinking":
+            thinking_blocks.append({
+                "thinking": block.get("thinking", "")[:settings.reasoning_trace_max_chars],
+                "signature": block.get("signature"),
             })
 
     usage = body.get("usage")
@@ -104,6 +112,7 @@ def parse_response(body: dict) -> dict:
         "finish_reason": finish_reason,
         "tool_calls": tool_calls,
         "token_usage": token_usage,
+        "thinking_blocks": thinking_blocks,
     }
 
 
@@ -137,6 +146,10 @@ def parse_sse_chunk(chunk_data: str) -> dict | None:
             return {"content": delta.get("text"), "finish_reason": None, "tool_calls_delta": None, "usage": None}
         elif delta.get("type") == "input_json_delta":
             return {"content": None, "finish_reason": None, "tool_input_delta": delta.get("partial_json"), "usage": None}
+        elif delta.get("type") == "thinking_delta":
+            return {"thinking_delta": delta.get("thinking"), "finish_reason": None, "tool_calls_delta": None, "usage": None}
+        elif delta.get("type") == "signature_delta":
+            return {"signature_delta": delta.get("signature"), "finish_reason": None, "tool_calls_delta": None, "usage": None}
 
     elif event_type == "message_delta":
         delta = data.get("delta", {})
@@ -166,6 +179,8 @@ def parse_sse_chunk(chunk_data: str) -> dict | None:
                 }],
                 "usage": None,
             }
+        elif block.get("type") == "thinking":
+            return {"thinking_block_start": data.get("index"), "finish_reason": None, "tool_calls_delta": None, "usage": None}
 
     return None
 
@@ -179,6 +194,9 @@ class SSEAssembler:
         self._tool_calls_map: dict[int, dict] = {}
         self._usage: dict | None = None
         self._current_tool_idx: int | None = None
+        self._thinking_parts: list[str] = []
+        self._thinking_signature: str | None = None
+        self._in_thinking_block: bool = False
 
     def feed(self, chunk: dict | None) -> bool:
         if chunk is None:
@@ -189,10 +207,20 @@ class SSEAssembler:
             self._finish_reason = chunk["finish_reason"]
         if chunk.get("usage"):
             self._usage = chunk["usage"]
+        if "thinking_block_start" in chunk:
+            self._in_thinking_block = True
+        if chunk.get("thinking_delta"):
+            # Guard: auto-activate block even if thinking_block_start was missed
+            if not self._in_thinking_block:
+                self._in_thinking_block = True
+            self._thinking_parts.append(chunk["thinking_delta"])
+        if chunk.get("signature_delta"):
+            self._thinking_signature = chunk["signature_delta"]
         for tc_delta in (chunk.get("tool_calls_delta") or []):
             idx = tc_delta.get("index", 0)
             if idx not in self._tool_calls_map:
                 self._tool_calls_map[idx] = {"id": "", "name": "", "arguments": ""}
+            self._current_tool_idx = idx  # track most recently active tool block
             entry = self._tool_calls_map[idx]
             if tc_delta.get("id"):
                 entry["id"] = tc_delta["id"]
@@ -202,8 +230,10 @@ class SSEAssembler:
             if func.get("arguments"):
                 entry["arguments"] += func["arguments"]
         if chunk.get("tool_input_delta") and self._current_tool_idx is not None:
-            entry = self._tool_calls_map.get(self._current_tool_idx, {"id": "", "name": "", "arguments": ""})
-            entry["arguments"] = entry.get("arguments", "") + chunk["tool_input_delta"]
+            entry = self._tool_calls_map.setdefault(
+                self._current_tool_idx, {"id": "", "name": "", "arguments": ""}
+            )
+            entry["arguments"] += chunk["tool_input_delta"]
         return self._finish_reason is not None
 
     def build_response(self) -> dict:
@@ -211,11 +241,18 @@ class SSEAssembler:
             {"id": tc["id"], "name": tc["name"], "arguments": tc["arguments"]}
             for tc in self._tool_calls_map.values()
         ]
+        thinking_blocks = []
+        if self._thinking_parts:
+            thinking_blocks = [{
+                "thinking": "".join(self._thinking_parts)[:settings.reasoning_trace_max_chars],
+                "signature": self._thinking_signature,
+            }]
         return {
             "response_text": "".join(self._content_parts) or None,
             "finish_reason": self._finish_reason,
             "tool_calls": tool_calls,
             "token_usage": self._usage,
+            "thinking_blocks": thinking_blocks,
         }
 
 

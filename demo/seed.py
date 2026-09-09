@@ -1,5 +1,5 @@
 """
-AgentBlackBox Demo Data Seeder
+Aegivis Demo Data Seeder
 ===============================
 Directly posts realistic synthetic events and violations to the backend.
 No LLM or API key required. Populates the dashboard for demo/review purposes.
@@ -11,14 +11,14 @@ Generates:
   - 7-day time spread so time-series charts show real trends, not a single spike
 
 Usage:
-    cd AgentBlackBox
+    cd Aegivis
     pip install httpx
     python demo/seed.py
 
 After running, open: http://localhost:5173
 
 Reset all data:
-    docker exec abb-postgres psql -U abb -d agentblackbox \\
+    docker exec aegivis-postgres psql -U abb -d aegivis \\
       -c "TRUNCATE audit_events, violations CASCADE;"
 
 Idempotent: re-running adds more sessions (new UUIDs each time).
@@ -599,7 +599,7 @@ PER_AGENT_SCHEDULE = [
 # ─── Main seeder ──────────────────────────────────────────────────────────────
 
 def main():
-    print("\nAgentBlackBox Demo Data Seeder")
+    print("\nAegivis Demo Data Seeder")
     print("=" * 52)
 
     if not check_backend():
@@ -673,7 +673,7 @@ def main():
     print("  Policy    : http://localhost:5173/policy  (click Generate Suggestions)")
     print()
     print("Reset all data:")
-    print('  docker exec abb-postgres psql -U abb -d agentblackbox \\')
+    print('  docker exec aegivis-postgres psql -U abb -d aegivis \\')
     print('    -c "TRUNCATE audit_events, violations CASCADE;"')
 
 

@@ -6,7 +6,6 @@ GET /v1/metrics/models   -- Per-model usage statistics.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,7 +39,7 @@ async def metrics_overview(
             COUNT(*) FILTER (WHERE event_type = 'SYSTEM_ERROR')                    AS error_count,
             COUNT(*) FILTER (WHERE event_type = 'MEMORY_WRITE_BLOCKED')            AS memory_blocked_count,
             COALESCE(SUM(
-                CAST(payload->>'total_tokens' AS INTEGER)
+                CAST(NULLIF(payload->>'total_tokens', '') AS INTEGER)
             ) FILTER (WHERE event_type = 'LLM_CALL_END'
                         AND payload->>'total_tokens' IS NOT NULL), 0)               AS total_tokens,
             COUNT(*) FILTER (WHERE cardinality(pii_detected) > 0)                 AS pii_event_count,
@@ -116,7 +115,7 @@ async def metrics_overview(
 
 @router.get("/metrics/agents", summary="Per-agent performance and security metrics")
 async def metrics_agents(
-    agent_id: Optional[str] = Query(None, description="Filter to a single agent ID"),
+    agent_id: str | None = Query(None, description="Filter to a single agent ID"),
     limit: int = Query(50, le=200),
     offset: int = Query(0),
     db: AsyncSession = Depends(get_session),
@@ -139,7 +138,7 @@ async def metrics_agents(
             COUNT(*) FILTER (WHERE ae.event_type = 'TOOL_CALL_START')              AS tool_call_count,
             COUNT(*) FILTER (WHERE ae.event_type = 'SYSTEM_ERROR')                 AS error_count,
             COALESCE(SUM(
-                CAST(ae.payload->>'total_tokens' AS INTEGER)
+                CAST(NULLIF(ae.payload->>'total_tokens', '') AS INTEGER)
             ) FILTER (WHERE ae.event_type = 'LLM_CALL_END'
                         AND ae.payload->>'total_tokens' IS NOT NULL), 0)            AS total_tokens,
             ROUND(AVG(
@@ -207,7 +206,7 @@ async def metrics_models(
             COUNT(*) FILTER (WHERE event_type = 'LLM_CALL_START')                  AS call_count,
             COUNT(*) FILTER (WHERE event_type = 'SYSTEM_ERROR')                    AS error_count,
             COALESCE(SUM(
-                CAST(payload->>'total_tokens' AS INTEGER)
+                CAST(NULLIF(payload->>'total_tokens', '') AS INTEGER)
             ) FILTER (WHERE event_type = 'LLM_CALL_END'
                         AND payload->>'total_tokens' IS NOT NULL), 0)               AS total_tokens,
             ROUND(AVG(

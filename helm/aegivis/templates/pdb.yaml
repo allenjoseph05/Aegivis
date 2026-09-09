@@ -1,0 +1,31 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# Aegivis PodDisruptionBudgets — prevents all pods from being evicted simultaneously
+# during node maintenance or cluster upgrades.
+# Enable when replicaCount > 1 for proxy and backend.
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "aegivis.fullname" . }}-proxy
+  labels:
+    {{- include "aegivis.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.proxy.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: proxy
+      {{- include "aegivis.selectorLabels" . | nindent 6 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "aegivis.fullname" . }}-backend
+  labels:
+    {{- include "aegivis.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.backend.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: backend
+      {{- include "aegivis.selectorLabels" . | nindent 6 }}
+{{- end }}

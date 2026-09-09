@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aegivis.fullname" . }}-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aegivis.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+spec:
+  replicas: {{ .Values.proxy.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "aegivis.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: proxy
+  template:
+    metadata:
+      labels:
+        {{- include "aegivis.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: proxy
+    spec:
+      containers:
+        - name: proxy
+          image: "{{ .Values.proxy.image.repository }}:{{ .Values.proxy.image.tag }}"
+          imagePullPolicy: {{ .Values.proxy.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: AEGIVIS_BACKEND_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "aegivis.fullname" . }}-config
+                  key: AEGIVIS_BACKEND_URL
+            - name: AEGIVIS_ORG_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "aegivis.fullname" . }}-config
+                  key: AEGIVIS_ORG_ID
+            - name: AEGIVIS_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "aegivis.fullname" . }}-config
+                  key: AEGIVIS_LOG_LEVEL
+            - name: AEGIVIS_PII_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "aegivis.fullname" . }}-config
+                  key: AEGIVIS_PII_ENABLED
+            - name: AEGIVIS_METRICS_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "aegivis.fullname" . }}-config
+                  key: AEGIVIS_METRICS_ENABLED
+            - name: AEGIVIS_OTEL_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "aegivis.fullname" . }}-config
+                  key: AEGIVIS_OTEL_ENABLED
+            - name: AEGIVIS_BACKEND_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.proxy.secretName }}
+                  key: AEGIVIS_BACKEND_API_KEY
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.proxy.secretName }}
+                  key: OPENAI_API_KEY
+                  optional: true
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.proxy.secretName }}
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+          resources:
+            {{- toYaml .Values.proxy.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3

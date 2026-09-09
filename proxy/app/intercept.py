@@ -16,11 +16,14 @@ Flow for each LLM API call:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
 import uuid
 from typing import Any
+
+import httpx
 
 from .canonicalize import (
     make_agent_finish,
@@ -31,6 +34,7 @@ from .canonicalize import (
 )
 from .config import settings
 from .hash_chain import compute_event_hash, genesis_hash, merkle_root
+from .security.remote_config import SecurityConfig, get_security_config
 from .pii import mask_dict
 from .reconstruct import (
     extract_tool_results_from_request,
@@ -41,6 +45,7 @@ from .policy import PolicyAction, PolicyViolation, get_policy_engine
 from .session import SessionState, SessionTracker
 from .tool_permissions import get_tool_permissions_engine
 from .transport import get_transport, EventTransport
+from .security.tool_output_scanner import scan as scan_tool_output
 
 logger = logging.getLogger(__name__)
 
@@ -72,15 +77,14 @@ def _extract_system_prompt(body: dict) -> str | None:
     return None
 
 
-def _hash_prompt(text: str) -> str:
-    """Return a short SHA-256 hex digest of a string."""
-    import hashlib
-    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
-
 
 class InterceptContext:
     """
-    Stateless per-request context. Session state is held in SessionTracker.
+    Per-request context. Holds resolved config, transport, and org identity.
+
+    Not stateless — caches _cfg (security config for this org+agent pair),
+    agent_id, and transport for the duration of a single request.
+    Session state is separate, held in SessionTracker and persisted across requests.
     """
 
     def __init__(
@@ -92,8 +96,10 @@ class InterceptContext:
     ):
         self.session_tracker = session_tracker
         self.org_id = org_id
+        self.agent_id: str = ""
         self.transport = transport if transport is not None else get_transport()
         self.policy_engine = get_policy_engine()
+        self._cfg: SecurityConfig | None = None   # loaded once per request via _load_cfg()
 
     def _sign_event(self, event: dict, previous_hash: str) -> dict:
         """Fill previous_hash and compute current_hash."""
@@ -101,9 +107,18 @@ class InterceptContext:
         event["current_hash"] = compute_event_hash(event)
         return event
 
+    async def _load_cfg(self) -> SecurityConfig:
+        """Fetch (cached) org+agent security config. Called once at the start of each request."""
+        if self._cfg is None:
+            self._cfg = await get_security_config(
+                self.org_id or "default-org", self.agent_id
+            )
+        return self._cfg
+
     def _apply_pii(self, event: dict) -> dict:
         """Run Presidio on event payload in-place. Store original hash as payload_hash."""
-        if not settings.pii_enabled:
+        pii_on = self._cfg.pii_detection_enabled if self._cfg else settings.pii_enabled
+        if not pii_on:
             return event
 
         payload = event.get("payload", {})
@@ -134,6 +149,220 @@ class InterceptContext:
                 self.transport.enqueue_violation(v.to_dict())
         return violations
 
+    # ── Private guard methods ──────────────────────────────────────────────────
+
+    def _check_spawn_depth(
+        self,
+        state: SessionState,
+        session_id: str,
+        agent_id: str,
+        max_depth: int,
+    ) -> list[PolicyViolation] | None:
+        """Block agents spawned beyond max_depth. Returns violation list or None to continue."""
+        if max_depth <= 0 or state.spawn_depth <= max_depth:
+            return None
+        logger.warning(
+            "[SPAWN-DEPTH:BLOCK] depth=%d max=%d session=%s agent=%s parent_agent=%s",
+            state.spawn_depth, max_depth, session_id, agent_id,
+            state.parent_agent_id or "none",
+        )
+        sv = PolicyViolation(
+            rule_name="spawn-depth-exceeded",
+            action=PolicyAction.BLOCK,
+            reason=(
+                f"Agent spawn depth {state.spawn_depth} exceeds maximum "
+                f"allowed depth of {max_depth}. "
+                f"Parent agent: {state.parent_agent_id or 'unknown'}. "
+                f"Check for runaway delegation or compromised orchestrator."
+            ),
+            event_type="LLM_CALL_START",
+            session_id=session_id,
+            agent_id=agent_id,
+            org_id=self.org_id,
+        )
+        if settings.violations_enabled:
+            self.transport.enqueue_violation(sv.to_dict())
+        return [sv]
+
+    def _check_ml_flag(
+        self,
+        state: SessionState,
+        session_id: str,
+        agent_id: str,
+    ) -> list[PolicyViolation] | None:
+        """Block if async ML classifier flagged injection in the previous turn.
+        Consumes the flag so it fires at most once. Returns violation list or None."""
+        if not state.ml_injection_flag:
+            return None
+        state.ml_injection_flag = False  # consume — only fires once per turn
+        logger.warning(
+            "[ML-CLASSIFIER:BLOCK] Multi-turn injection detected in previous turn: "
+            "score=%.3f session=%s agent=%s",
+            state.ml_injection_score, session_id, agent_id,
+        )
+        v = PolicyViolation(
+            rule_name="ml-classifier-injection-block",
+            action=PolicyAction.BLOCK,
+            reason=(
+                f"Async ML classifier detected prompt injection in previous turn: "
+                f"score={state.ml_injection_score:.3f} "
+                f"model={settings.analysis_classifier_model}"
+            ),
+            event_type="LLM_CALL_START",
+            session_id=session_id,
+            agent_id=agent_id,
+            org_id=self.org_id,
+        )
+        if settings.violations_enabled:
+            self.transport.enqueue_violation(v.to_dict())
+        return [v]
+
+    async def _check_hitl_pending(
+        self,
+        state: SessionState,
+        session_id: str,
+        agent_id: str,
+    ) -> list[PolicyViolation] | None:
+        """Poll backend for HITL approval decision. Returns violation list if denied/expired,
+        or None to continue (approved or no pending approval)."""
+        if not state.hitl_pending_approval_id:
+            return None
+        approval_id = state.hitl_pending_approval_id
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + settings.hitl_timeout_seconds
+        decision = "pending"
+        logger.info(
+            "[HITL] Waiting for approval id=%s session=%s agent=%s",
+            approval_id, session_id, agent_id,
+        )
+        async with httpx.AsyncClient(timeout=5.0) as _hc:
+            while loop.time() < deadline:
+                try:
+                    _gr = await _hc.get(
+                        f"{settings.backend_url}/v1/approvals/{approval_id}",
+                        headers={"X-API-Key": settings.backend_api_key},
+                    )
+                    if _gr.status_code == 200:
+                        decision = _gr.json().get("status", "pending")
+                        if decision in ("approved", "denied", "expired"):
+                            break
+                except Exception as _he:
+                    logger.debug("[HITL] Poll error: %s", _he)
+                await asyncio.sleep(2.0)
+        state.hitl_pending_approval_id = None
+        if decision == "approved":
+            return None
+        logger.warning(
+            "[HITL] LLM call blocked: approval=%s decision=%s session=%s",
+            approval_id, decision, session_id,
+        )
+        hv = PolicyViolation(
+            rule_name="hitl-denied",
+            action=PolicyAction.BLOCK,
+            reason=(
+                f"HITL approval {decision}: tool call approval was not granted "
+                f"(approval_id={approval_id})"
+            ),
+            event_type="LLM_CALL_START",
+            session_id=session_id,
+            agent_id=agent_id,
+            org_id=self.org_id,
+        )
+        if settings.violations_enabled:
+            self.transport.enqueue_violation(hv.to_dict())
+        return [hv]
+
+    def _build_llm_call_start(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        provider: str,
+        model: str,
+        messages: list[dict],
+        tools: list[dict],
+        request_data: dict,
+        run_id: str,
+        seq: int,
+        prev_hash: str,
+        state: SessionState,
+    ) -> dict:
+        """
+        Build, PII-mask, and hash-chain-sign the initial LLM_CALL_START event dict.
+
+        Enriches with spawn chain metadata when applicable.
+        Does NOT run any security scans — callers should apply those after receiving
+        the returned event and before enqueuing it.
+        """
+        start_event = make_llm_call_start(
+            session_id=session_id,
+            org_id=self.org_id,
+            agent_id=agent_id,
+            provider=provider,
+            model=model,
+            messages=messages,  # original messages — canary is NOT in the audit log
+            tools=tools,
+            temperature=request_data.get("temperature"),
+            max_tokens=request_data.get("max_tokens"),
+            stream=request_data.get("stream"),
+            extra_params={
+                k: v for k, v in request_data.items()
+                if k not in {"messages", "tools", "functions", "temperature", "max_tokens", "stream", "model"}
+            } or None,
+            run_id=run_id,
+            sequence_number=seq,
+            previous_hash=prev_hash,
+        )
+        start_event = self._apply_pii(start_event)
+        start_event = self._sign_event(start_event, prev_hash)
+
+        # Enrich with spawn chain metadata so topology + audit can use it
+        if state.spawn_depth > 0:
+            start_event.setdefault("payload", {}).update({
+                "spawn_depth": state.spawn_depth,
+                "parent_agent_id": state.parent_agent_id,
+                "parent_session_id": state.parent_session_id,
+            })
+
+        return start_event
+
+    def _handle_error_response(
+        self,
+        state: SessionState,
+        session_id: str,
+        agent_id: str,
+        provider: str,
+        model: str,
+        run_id: str,
+        response_data: dict,
+        http_status: int,
+        seq: int,
+        prev_hash: str,
+    ) -> bool:
+        """Emit SYSTEM_ERROR event for 4xx/5xx responses and update session state.
+        Returns True if the response was an error (caller should return early)."""
+        if http_status < 400:
+            return False
+        state.error_count += 1
+        error_event = make_system_error(
+            session_id=session_id,
+            org_id=self.org_id,
+            agent_id=agent_id,
+            provider=provider,
+            model=model,
+            run_id=run_id,
+            error_message=str(response_data),
+            http_status=http_status,
+            sequence_number=seq,
+            previous_hash=prev_hash,
+        )
+        error_event = self._sign_event(error_event, prev_hash)
+        state.sequence_number = seq + 1
+        state.last_hash = error_event["current_hash"]
+        state.last_seen_ns = time.time_ns()
+        self.transport.enqueue(error_event)
+        return True
+
     async def process_request(
         self,
         *,
@@ -154,6 +383,12 @@ class InterceptContext:
             - forward_body: if not None, serialize and use instead of the
               original request body (contains canary + spotlighting modifications).
         """
+        # Store agent_id before loading config so _load_cfg uses the agent-specific cache key
+        self.agent_id = agent_id
+
+        # Load org+agent security config (cached, 60s TTL — dashboard changes take effect promptly)
+        cfg = await self._load_cfg()
+
         messages = request_data.get("messages", [])
         tools = request_data.get("tools") or request_data.get("functions") or []
 
@@ -172,62 +407,24 @@ class InterceptContext:
         prev_hash = state.last_hash
 
         # --- Spawn depth enforcement (Phase 6) --------------------------------
-        # Block agents spawned beyond the configured max depth to prevent
-        # runaway delegation chains and trust-boundary violations.
-        max_depth = settings.max_spawn_depth
-        if max_depth > 0 and state.spawn_depth > max_depth:
-            logger.warning(
-                "[SPAWN-DEPTH:BLOCK] depth=%d max=%d session=%s agent=%s parent_agent=%s",
-                state.spawn_depth, max_depth, session_id, agent_id,
-                state.parent_agent_id or "none",
-            )
-            sv = PolicyViolation(
-                rule_name="spawn-depth-exceeded",
-                action=PolicyAction.BLOCK,
-                reason=(
-                    f"Agent spawn depth {state.spawn_depth} exceeds maximum "
-                    f"allowed depth of {max_depth}. "
-                    f"Parent agent: {state.parent_agent_id or 'unknown'}. "
-                    f"Check for runaway delegation or compromised orchestrator."
-                ),
-                event_type="LLM_CALL_START",
-                session_id=session_id,
-                agent_id=agent_id,
-                org_id=self.org_id,
-            )
-            if settings.violations_enabled:
-                self.transport.enqueue_violation(sv.to_dict())
-            return session_id, str(uuid.uuid4()), [sv], None
+        # Block agents spawned beyond the configured max depth.
+        if block := self._check_spawn_depth(
+            state, session_id, agent_id, cfg.spawn_depth_max
+        ):
+            return session_id, str(uuid.uuid4()), block, None
 
         # --- Phase 4: Check async ML injection flag from previous turn -------
-        # The async classifier runs AFTER forwarding. If it found injection in
-        # the previous turn it sets state.ml_injection_flag = True. We check
-        # that flag here and BLOCK the current call before the LLM sees it.
-        # This defends against multi-turn attack chains (e.g. inject turn 1 to
-        # exfil data in turn 2) without adding latency to the current call.
-        if settings.analysis_classifier_enabled and state.ml_injection_flag:
-            state.ml_injection_flag = False   # consume — only fires once
-            logger.warning(
-                "[ML-CLASSIFIER:BLOCK] Multi-turn injection detected in previous turn: "
-                "score=%.3f session=%s agent=%s",
-                state.ml_injection_score, session_id, agent_id,
-            )
-            v = PolicyViolation(
-                rule_name="ml-classifier-injection-block",
-                action=PolicyAction.BLOCK,
-                reason=(
-                    f"Async ML classifier detected prompt injection in previous turn: "
-                    f"score={state.ml_injection_score:.3f} "
-                    f"model={settings.analysis_classifier_model}"
-                ),
-                event_type="LLM_CALL_START",
-                session_id=session_id,
-                agent_id=agent_id,
-                org_id=self.org_id,
-            )
-            if settings.violations_enabled:
-                self.transport.enqueue_violation(v.to_dict())
-            return session_id, str(uuid.uuid4()), [v], None
+        # Async classifier runs after forwarding; defends against multi-turn
+        # attack chains (inject turn 1, exfil turn 2) with zero added latency.
+        if cfg.injection_ml_async_enabled:
+            if block := self._check_ml_flag(state, session_id, agent_id):
+                return session_id, str(uuid.uuid4()), block, None
+
+        # --- HITL hold: block LLM call until pending approval is resolved ----
+        # Polls backend until reviewer decides or deadline passes.
+        if cfg.hitl_enabled:
+            if block := await self._check_hitl_pending(state, session_id, agent_id):
+                return session_id, str(uuid.uuid4()), block, None
 
         # --- Infer TOOL_CALL_END from tool result messages ---
         tool_results = extract_tool_results_from_request(messages)
@@ -256,11 +453,10 @@ class InterceptContext:
                 # Pure pattern matching — runs always (no security_enabled gate).
                 if settings.security_tool_output_scanning_enabled and tr.get("content"):
                     try:
-                        from .security.tool_output_scanner import scan as _scan_tool_output
                         loop = asyncio.get_running_loop()
                         tool_out_result = await loop.run_in_executor(
                             None,
-                            lambda name=pending["tool_name"], content=tr["content"]: _scan_tool_output(name, content),
+                            lambda name=pending["tool_name"], content=tr["content"]: scan_tool_output(name, content),
                         )
                         if "security" not in tool_end:
                             tool_end["security"] = {}
@@ -315,7 +511,7 @@ class InterceptContext:
                         # This catches indirect injection payloads that pattern
                         # matching alone misses — e.g. paraphrased instructions
                         # embedded in a search result or email body.
-                        if settings.security_tool_output_ml_scan_enabled and tr.get("content"):
+                        if cfg.tool_output_ml_scan_enabled and tr.get("content"):
                             try:
                                 from .enforcement import scan_messages as _enf_scan_tool_out
                                 synthetic_msgs = [{"role": "user", "content": str(tr["content"])[:4096]}]
@@ -361,7 +557,7 @@ class InterceptContext:
                         logger.warning("Tool output scan error (continuing): %s", exc)
 
                 # Hook 2: Taint credentials returned by this tool result
-                if settings.security_taint_tracking_enabled and tr.get("content"):
+                if cfg.taint_tracking_enabled and tr.get("content"):
                     try:
                         from .security.taint_tracker import extract_credentials_from_text
                         tool_source = f"tool_result:{pending.get('tool_name', 'unknown')}"
@@ -370,42 +566,43 @@ class InterceptContext:
                     except Exception as _te:
                         logger.debug("Taint extraction from tool result failed (skipped): %s", _te)
 
+                # Hook 2-IFC: Label tool result as EXTERNAL in IFC context (Phase 11)
+                if cfg.ifc_enabled and tr.get("content"):
+                    try:
+                        from .security.ifc_labels import Label
+                        _ifc_tool_name = pending.get("tool_name", "unknown")
+                        _ifc_source_id = f"tool_result:{_ifc_tool_name}"
+                        state.get_ifc_context().add_source(
+                            _ifc_source_id, str(tr["content"]), Label.EXTERNAL
+                        )
+                    except Exception as _ie:
+                        logger.debug("IFC tool result labeling failed (skipped): %s", _ie)
+
+                # Hook 2-PDG: Register tool result as PDG source (Phase 10)
+                if cfg.pdg_enabled and tr.get("content"):
+                    try:
+                        from .security.session_pdg import classify_tool_trust
+                        _pdg_tool_name = pending.get("tool_name", "unknown")
+                        _pdg_trust = classify_tool_trust(_pdg_tool_name)
+                        _pdg_source_id = f"tool_result:{_pdg_tool_name}"
+                        state.get_pdg().add_source_node(
+                            _pdg_source_id, str(tr["content"]),
+                            trust=_pdg_trust, tool_name=_pdg_tool_name,
+                        )
+                    except Exception as _pe:
+                        logger.debug("PDG tool result source failed (skipped): %s", _pe)
+
                 seq += 1
                 prev_hash = tool_end["current_hash"]
                 self.transport.enqueue(tool_end)
 
         # --- LLM_CALL_START ---
         run_id = str(uuid.uuid4())
-
-        start_event = make_llm_call_start(
-            session_id=session_id,
-            org_id=self.org_id,
-            agent_id=agent_id,
-            provider=provider,
-            model=model,
-            messages=messages,  # original messages -- canary is NOT in the audit log
-            tools=tools,
-            temperature=request_data.get("temperature"),
-            max_tokens=request_data.get("max_tokens"),
-            stream=request_data.get("stream"),
-            extra_params={
-                k: v for k, v in request_data.items()
-                if k not in {"messages", "tools", "functions", "temperature", "max_tokens", "stream", "model"}
-            } or None,
-            run_id=run_id,
-            sequence_number=seq,
-            previous_hash=prev_hash,
+        start_event = self._build_llm_call_start(
+            session_id=session_id, agent_id=agent_id, provider=provider, model=model,
+            messages=messages, tools=tools, request_data=request_data,
+            run_id=run_id, seq=seq, prev_hash=prev_hash, state=state,
         )
-        start_event = self._apply_pii(start_event)
-        start_event = self._sign_event(start_event, prev_hash)
-
-        # Enrich event with spawn chain metadata so topology + audit can use it
-        if state.spawn_depth > 0:
-            start_event.setdefault("payload", {}).update({
-                "spawn_depth": state.spawn_depth,
-                "parent_agent_id": state.parent_agent_id,
-                "parent_session_id": state.parent_session_id,
-            })
 
         # --- System prompt mutation detection (Phase 6) ----------------------
         # Hash the system prompt on the first call (baseline) and compare on
@@ -414,7 +611,7 @@ class InterceptContext:
         # compromised orchestrator swapping instructions between turns.
         system_prompt = _extract_system_prompt(request_data)
         if system_prompt:
-            new_hash = _hash_prompt(system_prompt)
+            new_hash = hashlib.sha256(system_prompt.encode("utf-8", errors="replace")).hexdigest()[:16]
             if state.system_prompt_hash is None:
                 # Establish baseline — no violation on first call
                 state.system_prompt_hash = new_hash
@@ -423,13 +620,58 @@ class InterceptContext:
                     new_hash, session_id,
                 )
                 # Hook 1: Taint credentials found in system prompt
-                if settings.security_taint_tracking_enabled:
+                if cfg.taint_tracking_enabled:
                     try:
                         from .security.taint_tracker import extract_credentials_from_text
                         for cred_val, cred_label in extract_credentials_from_text(system_prompt):
                             state.get_taint_tracker().taint(cred_val, cred_label, "system_prompt")
                     except Exception as _te:
                         logger.debug("Taint extraction from system prompt failed (skipped): %s", _te)
+
+                # Hook 1-IFC: Label system prompt as TRUSTED in IFC context (Phase 11)
+                if cfg.ifc_enabled:
+                    try:
+                        from .security.ifc_labels import Label
+                        state.get_ifc_context().add_source("system_prompt", system_prompt, Label.TRUSTED)
+                    except Exception as _ie:
+                        logger.debug("IFC system prompt labeling failed (skipped): %s", _ie)
+
+                # Hook 1-PDG: Register system prompt as TRUSTED PDG source (Phase 10)
+                if cfg.pdg_enabled:
+                    try:
+                        state.get_pdg().add_source_node(
+                            "system_prompt", system_prompt, trust="trusted", tool_name=None
+                        )
+                    except Exception as _pe:
+                        logger.debug("PDG system prompt source failed (skipped): %s", _pe)
+
+                # --- Trust propagation (Phase 9) ----------------------------------
+                # If this child session's parent was compromised (ML flag or high
+                # injection score), lower the effective classifier threshold so the
+                # child is more sensitive. Only done once (trust_score == 1.0 guard).
+                if (
+                    settings.trust_propagation_enabled
+                    and state.spawn_depth > 0
+                    and state.parent_session_id
+                    and state.trust_score == 1.0
+                ):
+                    try:
+                        parent = self.session_tracker.get_state(state.parent_session_id)
+                        if parent is not None and (
+                            parent.ml_injection_flag
+                            or parent.max_injection_score > 0.7
+                        ):
+                            state.trust_score = 1.0 - settings.trust_propagation_discount
+                            logger.info(
+                                "[TRUST] child %s inherits reduced trust score=%.2f "
+                                "(parent=%s max_inj_score=%.3f ml_flag=%s)",
+                                session_id, state.trust_score,
+                                state.parent_session_id,
+                                parent.max_injection_score, parent.ml_injection_flag,
+                            )
+                    except Exception as _te:
+                        logger.debug("Trust propagation error (skipped): %s", _te)
+
             elif state.system_prompt_hash != new_hash:
                 logger.warning(
                     "[SYS-PROMPT:BLOCK] mutation detected: %s→%s session=%s agent=%s",
@@ -541,7 +783,7 @@ class InterceptContext:
         # description injection, shadow overloading.
         # Pure Python, no ML — runs always regardless of security_enabled.
         mcp_block_violations: list[PolicyViolation] = []
-        if settings.security_mcp_scanning_enabled and tools:
+        if cfg.mcp_scanning_enabled and tools:
             try:
                 from .security.mcp_scanner import scan as _scan_mcp
                 mcp_result = _scan_mcp(tools)
@@ -682,18 +924,18 @@ class InterceptContext:
 
         # --- Rate limiting: token budget + call budget -------------------------
         try:
-            if settings.rate_limit_max_tokens_per_session > 0:
-                if state.total_tokens >= settings.rate_limit_max_tokens_per_session:
+            if cfg.rate_limit_tokens > 0:
+                if state.total_tokens >= cfg.rate_limit_tokens:
                     logger.warning(
                         "[RATE-LIMIT:BLOCK] token budget exhausted: total=%d cap=%d session=%s",
-                        state.total_tokens, settings.rate_limit_max_tokens_per_session, session_id,
+                        state.total_tokens, cfg.rate_limit_tokens, session_id,
                     )
                     rv = PolicyViolation(
                         rule_name="token-budget-exceeded",
                         action=PolicyAction.BLOCK,
                         reason=(
                             f"Session token budget exhausted: {state.total_tokens} tokens used, "
-                            f"cap is {settings.rate_limit_max_tokens_per_session}"
+                            f"cap is {cfg.rate_limit_tokens}"
                         ),
                         event_type="LLM_CALL_START",
                         session_id=session_id,
@@ -703,18 +945,18 @@ class InterceptContext:
                     violations.append(rv)
                     if settings.violations_enabled:
                         self.transport.enqueue_violation(rv.to_dict())
-            if settings.rate_limit_max_llm_calls_per_session > 0:
-                if state.llm_call_count >= settings.rate_limit_max_llm_calls_per_session:
+            if cfg.rate_limit_llm_calls > 0:
+                if state.llm_call_count >= cfg.rate_limit_llm_calls:
                     logger.warning(
                         "[RATE-LIMIT:BLOCK] LLM call budget exhausted: calls=%d cap=%d session=%s",
-                        state.llm_call_count, settings.rate_limit_max_llm_calls_per_session, session_id,
+                        state.llm_call_count, cfg.rate_limit_llm_calls, session_id,
                     )
                     rcv = PolicyViolation(
                         rule_name="llm-call-budget-exceeded",
                         action=PolicyAction.BLOCK,
                         reason=(
                             f"Session LLM call budget exhausted: {state.llm_call_count} calls, "
-                            f"cap is {settings.rate_limit_max_llm_calls_per_session}"
+                            f"cap is {cfg.rate_limit_llm_calls}"
                         ),
                         event_type="LLM_CALL_START",
                         session_id=session_id,
@@ -761,7 +1003,7 @@ class InterceptContext:
 
         # --- Markov sequence tracking (Phase 3.3) ---
         # Score the LLM_CALL_START transition, then record it.
-        if settings.security_behavioral_enabled and state.event_type_sequence:
+        if cfg.behavioral_enabled and state.event_type_sequence:
             try:
                 from .security.markov import score_transition, observe_transition
                 prev_evt = state.event_type_sequence[-1]
@@ -822,7 +1064,7 @@ class InterceptContext:
 
         # Canary injection: embed a 256-bit random token in the system prompt.
         # Any appearance of this token in the LLM response confirms exfiltration.
-        if settings.security_canary_enabled:
+        if cfg.canary_enabled:
             try:
                 from .security.canary import generate as _gen_canary, inject_into_messages
                 canary_token = _gen_canary()
@@ -839,12 +1081,67 @@ class InterceptContext:
         # Classify the current messages with DeBERTa in a background thread.
         # If injection is detected, session.ml_injection_flag is set True and
         # the NEXT call in this session will be BLOCKed (see check above).
-        if settings.analysis_classifier_enabled:
+        if cfg.injection_ml_async_enabled:
             asyncio.create_task(
                 self._classify_messages_async(messages, state)
             )
 
         return session_id, run_id, violations, forward_body
+
+    def _build_llm_call_end(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        provider: str,
+        model: str,
+        run_id: str,
+        response_data: dict,
+        latency_ms: float,
+        http_status: int,
+        state: SessionState,
+        seq: int,
+        prev_hash: str,
+    ) -> dict:
+        """
+        Accumulate token usage onto session state, then build, PII-mask, and
+        hash-chain-sign the LLM_CALL_END event dict.
+
+        Side effect: mutates state.total_tokens with the tokens from this response.
+        """
+        token_usage = response_data.get("token_usage")
+        if token_usage and isinstance(token_usage, dict):
+            try:
+                used = int(
+                    token_usage.get("total_tokens") or
+                    token_usage.get("input_tokens", 0) + token_usage.get("output_tokens", 0) or
+                    0
+                )
+                if used > 0:
+                    state.total_tokens += used
+            except (TypeError, ValueError):
+                pass
+
+        end_event = make_llm_call_end(
+            session_id=session_id,
+            org_id=self.org_id,
+            agent_id=agent_id,
+            provider=provider,
+            model=model,
+            run_id=run_id,
+            response_text=response_data.get("response_text"),
+            finish_reason=response_data.get("finish_reason"),
+            tool_calls=response_data.get("tool_calls", []),
+            token_usage=token_usage,
+            latency_ms=latency_ms,
+            http_status=http_status,
+            thinking_blocks=response_data.get("thinking_blocks") or None,
+            sequence_number=seq,
+            previous_hash=prev_hash,
+        )
+        end_event = self._apply_pii(end_event)
+        end_event = self._sign_event(end_event, prev_hash)
+        return end_event
 
     async def _classify_messages_async(
         self,
@@ -870,15 +1167,23 @@ class InterceptContext:
             if not segments:
                 return
 
-            text = " ".join(segments)[:2048]  # cap for speed
+            full_text = " ".join(segments)
+            text = full_text[:2048]  # DeBERTa primary — cap at 512 tokens
+
+            # Apply trust-adjusted threshold: child sessions of compromised
+            # parents get a lower threshold (more sensitive detection).
+            _async_cfg = await self._load_cfg()
+            effective_threshold = _async_cfg.injection_ml_threshold * state.trust_score
 
             loop = asyncio.get_running_loop()
+
+            # ── Primary async: DeBERTa (thorough, ~50ms) ──────────────────
             result = await loop.run_in_executor(
                 None,
                 lambda: _ml_classify(
                     text,
                     model_name=settings.analysis_classifier_model,
-                    threshold=settings.analysis_classifier_threshold,
+                    threshold=effective_threshold,
                 ),
             )
 
@@ -936,70 +1241,27 @@ class InterceptContext:
         for BLOCK violations and return 403 before forwarding the response to the
         agent (non-streaming only; streaming responses are already in flight).
         """
+        cfg = await self._load_cfg()
         state: SessionState = self.session_tracker.get_state(session_id)
         _response_violations: list[PolicyViolation] = []
         seq = state.sequence_number
         prev_hash = state.last_hash
 
-        if http_status >= 400:
-            state.error_count += 1
-            error_event = make_system_error(
-                session_id=session_id,
-                org_id=self.org_id,
-                agent_id=agent_id,
-                provider=provider,
-                model=model,
-                run_id=run_id,
-                error_message=str(response_data),
-                http_status=http_status,
-                sequence_number=seq,
-                previous_hash=prev_hash,
-            )
-            error_event = self._sign_event(error_event, prev_hash)
-            seq += 1
-            prev_hash = error_event["current_hash"]
-            state.sequence_number = seq
-            state.last_hash = prev_hash
-            state.last_seen_ns = time.time_ns()
-            self.transport.enqueue(error_event)
+        if self._handle_error_response(
+            state, session_id, agent_id, provider, model, run_id,
+            response_data, http_status, seq, prev_hash,
+        ):
             return
 
         response_text = response_data.get("response_text")
         finish_reason = response_data.get("finish_reason")
         tool_calls = response_data.get("tool_calls", [])
-        token_usage = response_data.get("token_usage")
 
-        # Accumulate token usage for rate-limiting / budget enforcement
-        if token_usage and isinstance(token_usage, dict):
-            try:
-                used = int(
-                    token_usage.get("total_tokens") or
-                    token_usage.get("input_tokens", 0) + token_usage.get("output_tokens", 0) or
-                    0
-                )
-                if used > 0:
-                    state.total_tokens += used
-            except (TypeError, ValueError):
-                pass
-
-        end_event = make_llm_call_end(
-            session_id=session_id,
-            org_id=self.org_id,
-            agent_id=agent_id,
-            provider=provider,
-            model=model,
-            run_id=run_id,
-            response_text=response_text,
-            finish_reason=finish_reason,
-            tool_calls=tool_calls,
-            token_usage=token_usage,
-            latency_ms=latency_ms,
-            http_status=http_status,
-            sequence_number=seq,
-            previous_hash=prev_hash,
+        end_event = self._build_llm_call_end(
+            session_id=session_id, agent_id=agent_id, provider=provider, model=model,
+            run_id=run_id, response_data=response_data, latency_ms=latency_ms,
+            http_status=http_status, state=state, seq=seq, prev_hash=prev_hash,
         )
-        end_event = self._apply_pii(end_event)
-        end_event = self._sign_event(end_event, prev_hash)
 
         # ── Output scanning (Phase 3.2) ────────────────────────────────────────
         # Scan the LLM response for canary leakage, relay injection, credential
@@ -1038,7 +1300,7 @@ class InterceptContext:
                 logger.warning("Output scan error (continuing): %s", exc)
 
         # --- Markov: record LLM_CALL_END transition ---
-        if settings.security_behavioral_enabled and state.event_type_sequence:
+        if cfg.behavioral_enabled and state.event_type_sequence:
             try:
                 from .security.markov import score_transition, observe_transition
                 prev_evt = state.event_type_sequence[-1]
@@ -1084,6 +1346,7 @@ class InterceptContext:
             # --- Enforcement: RCE + SSRF + schema validation (always runs) ----
             # Deterministic, no ML. Provides rce_detected/ssrf_detected for
             # policy engine regardless of security_enabled setting.
+            tool_scan = None  # initialised before try; set inside on success
             try:
                 from .enforcement import scan_tool_call as enf_scan_tool, validate_tool_args
                 loop = asyncio.get_running_loop()
@@ -1126,11 +1389,58 @@ class InterceptContext:
             except Exception as exc:
                 logger.warning("Enforcement tool scan error (continuing): %s", exc)
 
+            # --- HITL gate: create approval request if this tool needs one ------
+            # Fires when: tool is in hitl_required_tools list, enforcement
+            # scanner flagged RCE/SSRF, or tainted creds are heading to a
+            # network-sink tool. The agent sees the tool call proceed — but the
+            # NEXT LLM call will be held until a reviewer decides.
+            if cfg.hitl_enabled and not state.hitl_pending_approval_id:
+                _hitl_trigger: str | None = None
+                if tc_name in settings.hitl_required_tools_set:
+                    _hitl_trigger = "hitl_tool_list"
+                elif tool_scan is not None and (tool_scan.rce_detected or tool_scan.ssrf_detected):
+                    _hitl_trigger = "hitl_score_threshold"
+                elif settings.hitl_on_network_sink and state.taint_tracker:
+                    try:
+                        _hits = state.taint_tracker.check_tool_call(
+                            tc_name, tc_args if isinstance(tc_args, dict) else {}
+                        )
+                        if any(h.is_network_sink for h in _hits):
+                            _hitl_trigger = "hitl_network_sink"
+                    except Exception:
+                        pass
+
+                if _hitl_trigger:
+                    try:
+                        import httpx as _httpx
+                        import json as _json
+                        async with _httpx.AsyncClient(timeout=5.0) as _hc:
+                            _resp = await _hc.post(
+                                f"{settings.backend_url}/v1/approvals",
+                                json={
+                                    "session_id": session_id,
+                                    "agent_id": agent_id,
+                                    "tool_name": tc_name,
+                                    "tool_args": tc_args if isinstance(tc_args, dict) else {},
+                                    "trigger": _hitl_trigger,
+                                    "timeout_seconds": settings.hitl_timeout_seconds,
+                                },
+                                headers={"X-API-Key": settings.backend_api_key},
+                            )
+                            if _resp.status_code == 200:
+                                state.hitl_pending_approval_id = _resp.json().get("id")
+                                logger.info(
+                                    "[HITL] Approval created: id=%s tool=%s trigger=%s session=%s",
+                                    state.hitl_pending_approval_id, tc_name, _hitl_trigger, session_id,
+                                )
+                    except Exception as _he:
+                        logger.warning("[HITL] Failed to create approval request: %s", _he)
+
             # --- Hook 3: Data flow taint check (Phase 8) -------------------------
             # Detect credential exfiltration: a tainted value (from system prompt
             # or tool result) appearing verbatim in a tool call argument.
             # Network-sink tools: BLOCK.  Other tools: ALERT.
-            if settings.security_taint_tracking_enabled and state.taint_tracker:
+            if cfg.taint_tracking_enabled and state.taint_tracker:
                 try:
                     taint_hits = state.taint_tracker.check_tool_call(tc_name, tc_args if isinstance(tc_args, dict) else {})
                     for hit in taint_hits:
@@ -1176,6 +1486,211 @@ class InterceptContext:
                                 self.transport.enqueue_violation(av.to_dict())
                 except Exception as _te:
                     logger.debug("Taint check error (skipped): %s", _te)
+
+            # --- Hook 3-IFC: IFC label flow check (Phase 11) ----------------------
+            # Deterministic check: did EXTERNAL-labeled content flow into a
+            # privileged sink argument? No ML, no heuristics — pure label math.
+            if cfg.ifc_enabled and state.ifc_context:
+                try:
+                    _extra_sinks: frozenset[str] | None = None
+                    if settings.security_ifc_extra_sink_keys:
+                        _extra_sinks = frozenset(
+                            k.strip() for k in settings.security_ifc_extra_sink_keys.split(",")
+                            if k.strip()
+                        )
+                    _ifc_violations = state.ifc_context.check_tool_call(
+                        tc_name,
+                        tc_args if isinstance(tc_args, dict) else {},
+                        extra_sink_keys=_extra_sinks,
+                    )
+                    for _iv in _ifc_violations:
+                        _ifc_action = PolicyAction.BLOCK if (cfg.ifc_mode == 'block') else PolicyAction.ALERT
+                        _ifc_v = PolicyViolation(
+                            rule_name="ifc-external-to-sink",
+                            action=_ifc_action,
+                            reason=(
+                                f"IFC: EXTERNAL-labeled fragment (from {_iv.source_id}) "
+                                f"found in privileged sink arg '{_iv.arg_key}' of tool '{_iv.tool_name}'. "
+                                f"Possible injection-driven exfiltration."
+                            ),
+                            event_type="TOOL_CALL_START",
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            org_id=self.org_id,
+                        )
+                        logger.warning(
+                            "[IFC:%s] ifc-external-to-sink tool=%s arg=%s source=%s session=%s",
+                            _ifc_action.value, _iv.tool_name, _iv.arg_key, _iv.source_id, session_id,
+                        )
+                        if settings.violations_enabled:
+                            self.transport.enqueue_violation(_ifc_v.to_dict())
+                        if _ifc_action == PolicyAction.BLOCK:
+                            _response_violations.append(_ifc_v)
+                            tool_start.setdefault("security", {}).update(
+                                state.ifc_context.to_summary_dict()
+                            )
+                            tool_start["security"]["ifc_violation"] = {
+                                "arg_key": _iv.arg_key,
+                                "source_id": _iv.source_id,
+                                "fragment": _iv.fragment,
+                            }
+                        else:
+                            tool_start.setdefault("security", {}).update(
+                                state.ifc_context.to_summary_dict()
+                            )
+                except Exception as _ie:
+                    logger.debug("IFC check error (skipped): %s", _ie)
+
+            # --- Hook 3-PDG: Session PDG data-flow check (Phase 10) ---------------
+            # Detect multi-hop exfiltration: untrusted fragment from a prior tool
+            # result appearing in a sensitive argument of the current tool call.
+            # This catches chains the taint tracker misses (non-credential values
+            # like email addresses, URLs, and domain names from web search results).
+            if cfg.pdg_enabled and state.pdg:
+                try:
+                    _pdg_edges = state.pdg.check_tool_call(
+                        tc_name, tc_args if isinstance(tc_args, dict) else {}
+                    )
+                    if _pdg_edges:
+                        _pdg_action = PolicyAction.BLOCK if cfg.pdg_mode == "block" else PolicyAction.ALERT
+                        _pdg_v = PolicyViolation(
+                            rule_name="data-flow-graph-violation",
+                            action=_pdg_action,
+                            reason=(
+                                f"PDG: {len(_pdg_edges)} untrusted data-flow edge(s) detected. "
+                                f"Tool '{tc_name}' received fragments from untrusted sources: "
+                                + ", ".join(
+                                    f"{e.source_fragment[:40]!r} → {e.sink_arg}"
+                                    for e in _pdg_edges[:3]
+                                )
+                            ),
+                            event_type="TOOL_CALL_START",
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            org_id=self.org_id,
+                        )
+                        logger.warning(
+                            "[PDG:%s] data-flow-graph-violation tool=%s edges=%d session=%s",
+                            _pdg_action.value, tc_name, len(_pdg_edges), session_id,
+                        )
+                        if settings.violations_enabled:
+                            self.transport.enqueue_violation(_pdg_v.to_dict())
+                        # Enrich tool_start security field with edge data
+                        tool_start.setdefault("security", {}).update({
+                            "pdg_edges":   [e.to_dict() for e in _pdg_edges],
+                            "pdg_summary": state.pdg.to_summary_dict()["pdg_summary"],
+                        })
+                        if _pdg_action == PolicyAction.BLOCK:
+                            _response_violations.append(_pdg_v)
+                    else:
+                        # No violations — still record PDG summary for observability
+                        tool_start.setdefault("security", {}).update(
+                            state.pdg.to_summary_dict()
+                        )
+                except Exception as _pdgerr:
+                    logger.debug("PDG check error (skipped): %s", _pdgerr)
+
+            # --- Hard Egress Enforcement (Phase 13) -------------------------------
+            # Deterministic allowlist-based network destination check.
+            # Any tool call whose destination arg is not in the allowlist → BLOCK.
+            # Mode "audit" logs only; mode "allowlist" blocks; mode "off" skips.
+            if settings.security_egress_mode != "off":
+                try:
+                    from .security.egress_enforcer import (
+                        EgressEnforcer as _EgressEnforcer,
+                        get_egress_allowlist as _get_egress_allowlist,
+                    )
+                    _egress_allowed = await _get_egress_allowlist(self.org_id or "default-org")
+                    _egress = _EgressEnforcer(_egress_allowed)
+                    # Skip if no allowlist configured and not in audit mode
+                    if not _egress.is_empty() or settings.security_egress_mode == "audit":
+                        _egress_violations = _egress.check_tool_call(
+                            tc_name,
+                            tc_args if isinstance(tc_args, dict) else {},
+                        )
+                        for _ev in _egress_violations:
+                            _is_blocking = (
+                                settings.security_egress_mode == "allowlist"
+                                and not _egress.is_empty()
+                            )
+                            _eg_action = PolicyAction.BLOCK if _is_blocking else PolicyAction.ALERT
+                            _eg_v = PolicyViolation(
+                                rule_name="egress-destination-not-allowed",
+                                action=_eg_action,
+                                reason=(
+                                    f"Egress enforcement: tool '{_ev.tool_name}' arg "
+                                    f"'{_ev.arg_key}' targets '{_ev.destination}' "
+                                    f"which is not in the approved network destination allowlist."
+                                ),
+                                event_type="TOOL_CALL_START",
+                                session_id=session_id,
+                                agent_id=agent_id,
+                                org_id=self.org_id,
+                            )
+                            logger.warning(
+                                "[EGRESS:%s] egress-destination-not-allowed tool=%s dest=%s session=%s",
+                                _eg_action.value, _ev.tool_name, _ev.destination, session_id,
+                            )
+                            if settings.violations_enabled:
+                                self.transport.enqueue_violation(_eg_v.to_dict())
+                            if _is_blocking:
+                                _response_violations.append(_eg_v)
+                except Exception as _egresserr:
+                    logger.debug("Egress enforcement error (skipped): %s", _egresserr)
+
+            # --- Capability Manifest Validation (Phase 12) ------------------------
+            # Cryptographically signed manifest defines exactly what this agent
+            # is permitted to do. If a manifest is active, any tool call not in
+            # the manifest, or with arguments violating permitted patterns, is blocked.
+            # Agents with no manifest (learning mode) are not blocked here.
+            if settings.manifest_signing_key is not None:  # always enabled if config present
+                try:
+                    from .security.capability_manifest import (
+                        get_active_manifest as _get_manifest,
+                        ManifestValidator as _ManifestValidator,
+                    )
+                    _manifest = await _get_manifest(
+                        agent_id, self.org_id,
+                        settings.backend_url, settings.backend_api_key,
+                        signing_key=settings.manifest_signing_key,
+                        cache_ttl_s=settings.manifest_cache_ttl_s,
+                    )
+                    if _manifest is not None:
+                        _mv = _ManifestValidator(_manifest)
+                        _manifest_violations = _mv.check_tool_call(
+                            tc_name, tc_args if isinstance(tc_args, dict) else {}
+                        )
+                        for _mvi in _manifest_violations:
+                            _mf_action = PolicyAction.BLOCK if cfg.manifest_enforce_enabled else PolicyAction.ALERT
+                            _mf_v = PolicyViolation(
+                                rule_name="manifest-violation",
+                                action=_mf_action,
+                                reason=(
+                                    f"Manifest: {_mvi.detail} "
+                                    f"[manifest {_manifest.manifest_id}]"
+                                ),
+                                event_type="TOOL_CALL_START",
+                                session_id=session_id,
+                                agent_id=agent_id,
+                                org_id=self.org_id,
+                            )
+                            logger.warning(
+                                "[MANIFEST:%s] %s tool=%s arg=%s session=%s manifest=%s",
+                                _mf_action.value, _mvi.violation_type,
+                                _mvi.tool_name, _mvi.arg_key, session_id, _manifest.manifest_id,
+                            )
+                            if settings.violations_enabled:
+                                self.transport.enqueue_violation(_mf_v.to_dict())
+                            if _mf_action == PolicyAction.BLOCK:
+                                _response_violations.append(_mf_v)
+                                tool_start.setdefault("security", {})["manifest_violation"] = {
+                                    "type": _mvi.violation_type,
+                                    "arg_key": _mvi.arg_key,
+                                    "detail": _mvi.detail,
+                                    "manifest_id": _manifest.manifest_id,
+                                }
+                except Exception as _mferr:
+                    logger.debug("Manifest validation error (skipped): %s", _mferr)
 
             # --- Tool baseline enforcement ----------------------------------------
             # If the operator has approved a baseline for this agent, any tool
@@ -1240,7 +1755,7 @@ class InterceptContext:
                 continue  # Skip this tool call — don't emit or track it
 
             # --- Markov: record TOOL_CALL_START transition ---
-            if settings.security_behavioral_enabled and state.event_type_sequence:
+            if cfg.behavioral_enabled and state.event_type_sequence:
                 try:
                     from .security.markov import score_transition, observe_transition
                     prev_evt = state.event_type_sequence[-1]
@@ -1301,7 +1816,7 @@ class InterceptContext:
             finish_event = self._sign_event(finish_event, prev_hash)
 
             # --- Markov: record AGENT_FINISH transition ---
-            if settings.security_behavioral_enabled and state.event_type_sequence:
+            if cfg.behavioral_enabled and state.event_type_sequence:
                 try:
                     from .security.markov import score_transition, observe_transition
                     prev_evt = state.event_type_sequence[-1]
@@ -1334,7 +1849,7 @@ class InterceptContext:
                     logger.debug("Markov AGENT_FINISH tracking error (skipped): %s", exc)
 
             # --- Isolation Forest: score session at completion (Phase 3.3) ---
-            if settings.security_behavioral_enabled:
+            if cfg.behavioral_enabled:
                 try:
                     from .security.isolation_forest import fit_and_score as _if_score
                     loop = asyncio.get_running_loop()

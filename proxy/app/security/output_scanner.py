@@ -11,10 +11,13 @@ who controls tool outputs (indirect injection) may instruct the LLM to:
   - Echo back secret context (system prompt exfiltration)
   - Relay instructions to other agents or external systems
   - Expose credentials or PII that were in the system prompt
-  - Confirm a successful jailbreak by entering unrestricted mode
 
 The output scanner is the LAST defensive gate -- it fires when an attack
 has already penetrated earlier layers and influenced the model's response.
+
+Design principle: REGEX-FREE, PATTERN-LIST-FREE.
+Every detection is either cryptographic (canary), structural (our own
+marker tokens), or entropy-based (credential detection).
 
 Detections
 ----------
@@ -23,110 +26,46 @@ Detections
    so any appearance in output is definitively adversarial.
 
 2. Prompt structure echo  -- Response contains recognizable fragments of
-   our own security infrastructure (spotlighting markers, canary prefix,
-   security policy directives). Indicates the LLM was instructed to reveal
-   its context window.
+   OUR OWN security infrastructure (spotlighting markers, canary prefix).
+   Indicates the LLM was instructed to reveal its context window.
 
-3. Relay injection        -- LLM instructed to relay commands downstream.
-   Patterns: "execute this on your system", "pass these instructions to
-   the next agent", "send to URL X with payload Y".
+3. Credential in output   -- High-entropy strings matching known credential
+   entropy profiles. Detected via Shannon entropy + context scoring
+   (credential_scanner.py), not hardcoded regex patterns.
 
-4. Credential in output   -- API keys, JWT tokens, private keys appearing
-   in the LLM response. Should never occur in legitimate responses; their
-   presence means the LLM echoed content from a system prompt or tool
-   output that contained sensitive credentials.
+4. Relay injection (when ML enabled) -- LLM instructed to relay commands
+   downstream. Detected semantically by the ML classifier run on output,
+   not by regex. Without ML, relay detection defers to IFC + manifest +
+   egress enforcement catching the resulting tool call.
 
 Severity classification
 -----------------------
 CRITICAL : canary_detected OR credential_in_output
-HIGH     : prompt_echo AND relay_injection
-MEDIUM   : prompt_echo OR relay_injection
+HIGH     : prompt_echo AND relay_detected
+MEDIUM   : prompt_echo OR relay_detected
 LOW      : single weak signal
 NONE     : clean
 """
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Relay injection detection patterns
+# Relay injection detection — REMOVED (regex approach)
 # ---------------------------------------------------------------------------
-
-# These patterns detect when an LLM has been instructed to relay commands
-# to external systems. They fire on the RESPONSE, meaning the model has
-# already been hijacked and is about to carry out the attacker's plan.
-_RELAY_PATTERNS: list[tuple[re.Pattern, str]] = [
-    # Direct command relay to system
-    (re.compile(
-        r"\b(?:execute|run|eval)\b.{0,60}"
-        r"\b(?:command|script|payload|code|shell)\b",
-        re.IGNORECASE,
-    ), "command_relay"),
-
-    # Running "the following" / "this" command
-    (re.compile(
-        r"\brun\s+(?:the\s+)?(?:following|this)\s+(?:command|script|code|payload)\b",
-        re.IGNORECASE,
-    ), "script_relay"),
-
-    # Data exfiltration to external URL
-    (re.compile(
-        r"\bsend\b.{0,100}\b(?:to|via)\b.{0,100}"
-        r"\b(?:url|endpoint|server|webhook|http)\b",
-        re.IGNORECASE,
-    ), "data_exfiltration_url"),
-
-    # Explicit exfiltration / steal keywords
-    (re.compile(
-        r"\b(?:exfiltrat|extract\s+(?:and\s+send|to)|steal|leak)\b.{0,100}"
-        r"\b(?:data|credential|secret|token|key|password)\b",
-        re.IGNORECASE,
-    ), "credential_exfiltration"),
-
-    # Agent-to-agent relay
-    (re.compile(
-        r"\b(?:tell|instruct|ask|command|direct)\b.{0,60}"
-        r"\b(?:agent|assistant|tool|model|bot|llm)\b.{0,80}\bto\b",
-        re.IGNORECASE,
-    ), "agent_relay"),
-
-    # Instruction / payload forwarding
-    (re.compile(
-        r"\bpass\s+(?:this|these|the\s+following)\s+"
-        r"(?:instruction|command|message|payload|directive)\b",
-        re.IGNORECASE,
-    ), "instruction_relay"),
-
-    # URL with secrets in query params
-    (re.compile(
-        r"https?://[^\s]{10,}\?[^\s]*"
-        r"(?:secret|token|key|data|payload|pwd|pass)=[^\s&]{4,}",
-        re.IGNORECASE,
-    ), "url_with_secret_param"),
-
-    # DAN / jailbreak mode confirmation in output
-    (re.compile(
-        r"\b(?:i\s+am\s+now|i\s+have\s+(?:become|entered)|"
-        r"switching\s+to|enabling)\s+"
-        r"(?:DAN|jailbreak|unrestricted|dev(?:eloper)?\s+mode|"
-        r"no-filter|bypass\s+mode)\b",
-        re.IGNORECASE,
-    ), "jailbreak_confirmation"),
-
-    # Prompt injection acknowledgement
-    (re.compile(
-        r"\b(?:new\s+instructions?|updated\s+task|"
-        r"overriding\s+(?:previous|prior|original)\s+instructions?)\b",
-        re.IGNORECASE,
-    ), "instruction_override_acknowledgement"),
-]
-
-
+# Regex relay patterns are removed because any specific phrase pattern can be
+# bypassed by rephrasing the relay instruction. The right defense is at the
+# ACTION layer, not the OUTPUT layer:
+#   - IFC labels catch EXTERNAL-origin content flowing to sink args
+#   - Capability manifest blocks unauthorized tool calls
+#   - Egress enforcer blocks unlisted network destinations
+# When the ML classifier is enabled, it runs on the output text and detects
+# relay intent semantically (scan() calls _ml_relay_scan() below).
+#
 # ---------------------------------------------------------------------------
 # Prompt structure echo markers
 # ---------------------------------------------------------------------------
@@ -135,7 +74,7 @@ _RELAY_PATTERNS: list[tuple[re.Pattern, str]] = [
 # in an LLM response, the model was instructed to repeat its context window.
 _PROMPT_ECHO_MARKERS: tuple[str, ...] = (
     "SYSTEM_INTEGRITY_TOKEN",            # Canary header prefix
-    "ABB_CVT",                           # Full canary prefix
+    "AEGIVIS_CVT",                           # Full canary prefix
     "[SECURITY POLICY - READ CAREFULLY]",  # Spotlighting system directive
     "UNTRUSTED EXTERNAL DATA",           # Spotlighting tier label
     "EXTERNAL_DATA:source=",             # Spotlighting delimiter content
@@ -143,40 +82,10 @@ _PROMPT_ECHO_MARKERS: tuple[str, ...] = (
 )
 
 
-# ---------------------------------------------------------------------------
-# Credential patterns in output
-# ---------------------------------------------------------------------------
-
-# These should NEVER appear in an LLM response. Their presence means the
-# model echoed credentials that were in its system prompt or tool output.
-_OUTPUT_CREDENTIAL_PATTERNS: list[tuple[re.Pattern, str]] = [
-    # OpenAI API key
-    (re.compile(r"\bsk-[A-Za-z0-9]{20,60}\b"), "openai_key"),
-    # Anthropic API key
-    (re.compile(r"\bsk-ant-[A-Za-z0-9\-]{20,80}\b"), "anthropic_key"),
-    # AWS access key
-    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "aws_access_key"),
-    # AWS secret key pattern (= followed by 40 char alphanumeric)
-    (re.compile(r"\bAWS_SECRET[_A-Z]*\s*[:=]\s*[A-Za-z0-9/+]{40}\b"), "aws_secret_key"),
-    # GitHub personal access token (classic)
-    (re.compile(r"\bghp_[A-Za-z0-9]{36}\b"), "github_token"),
-    # GitHub fine-grained PAT
-    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{82}\b"), "github_fine_pat"),
-    # Private key block (PEM format)
-    (re.compile(r"-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----"), "pem_private_key"),
-    # JWT (3 base64url segments)
-    (re.compile(
-        r"\beyJ[A-Za-z0-9\-_]{20,}\."
-        r"[A-Za-z0-9\-_]{20,}\."
-        r"[A-Za-z0-9\-_]{20,}\b"
-    ), "jwt_token"),
-    # Generic high-entropy bearer token in Authorization header style
-    (re.compile(r"\bBearer\s+[A-Za-z0-9\-_.+/]{40,}\b"), "bearer_token"),
-    # Slack webhook token
-    (re.compile(r"\bhttps://hooks\.slack\.com/services/T[A-Z0-9]{8}/B[A-Z0-9]{10}/[A-Za-z0-9]{24}\b"), "slack_webhook"),
-    # Generic password assignment
-    (re.compile(r"\b(?:password|passwd|pwd)\s*[:=]\s*[^\s\"']{8,}\b", re.IGNORECASE), "password_exposure"),
-]
+# Credential detection in output uses the entropy-based credential_scanner,
+# not a hardcoded regex list. This catches novel credential formats and
+# unknown secret types that a regex list would miss.
+# See: proxy/app/security/credential_scanner.py
 
 
 # ---------------------------------------------------------------------------
@@ -223,18 +132,42 @@ class OutputScanResult:
 # Individual scan functions (exported for unit testing)
 # ---------------------------------------------------------------------------
 
+_ml_relay_warned: bool = False  # warn once, not per-request
+
+
+def _ml_relay_scan(text: str) -> tuple[bool, list[str]]:
+    """
+    Detect relay injection semantically using the ML classifier.
+    Returns (detected, [threat_id]) if classifier is available and scores high.
+    Falls back to (False, []) when classifier is not installed — logs once.
+
+    Uses DeBERTa classify() for output scanning.
+    Returns ClassifierResult — score and label are attributes.
+    """
+    global _ml_relay_warned
+    try:
+        from ..analysis.classifier import classify
+        result = classify(text[:2048])
+        if result.label == "malicious" and result.score >= 0.75:
+            return True, [f"ml_relay_injection:{result.score:.2f}"]
+    except ImportError:
+        if not _ml_relay_warned:
+            _ml_relay_warned = True
+            logger.warning(
+                "ML classifier not installed — relay injection detection in output_scanner "
+                "is DISABLED. Install with: pip install 'aegivis-proxy[classifier]'"
+            )
+    except Exception as exc:
+        logger.debug("_ml_relay_scan: classifier error: %s", exc)
+    return False, []
+
+
 def scan_relay_injection(text: str) -> tuple[bool, list[str]]:
     """
-    Scan response text for relay injection attack indicators.
-
-    Returns:
-        (detected, list_of_threat_ids)
+    Detect relay injection in LLM output.
+    Uses ML classifier (semantic) rather than regex (bypassable).
     """
-    threats = []
-    for pattern, threat_id in _RELAY_PATTERNS:
-        if pattern.search(text):
-            threats.append(threat_id)
-    return bool(threats), threats
+    return _ml_relay_scan(text)
 
 
 def scan_prompt_echo(text: str) -> tuple[bool, list[str]]:
@@ -250,20 +183,26 @@ def scan_prompt_echo(text: str) -> tuple[bool, list[str]]:
 
 def scan_credentials_in_output(text: str) -> tuple[bool, list[str]]:
     """
-    Scan response for credential and secret patterns.
+    Scan response for credential and secret patterns using entropy-based detection.
 
-    These should never appear in a legitimate LLM response; their presence
-    implies the model echoed contents of a system prompt or tool output
-    that contained live credentials.
+    Uses credential_scanner.py (Shannon entropy + context proximity + structural
+    format scoring) instead of a hardcoded regex list. This catches novel
+    credential formats and unknown secret types that regex would miss.
 
     Returns:
         (detected, list_of_credential_type_ids)
     """
-    found = []
-    for pattern, cred_type in _OUTPUT_CREDENTIAL_PATTERNS:
-        if pattern.search(text):
-            found.append(cred_type)
-    return bool(found), found
+    try:
+        from .credential_scanner import scan as _cred_scan
+        result = _cred_scan(text)
+        if result.detected:
+            return True, [
+                f"credential:{m.value_preview}(conf={m.confidence:.2f})"
+                for m in result.matches
+            ]
+    except Exception as exc:
+        logger.debug("Credential scan error (output): %s", exc)
+    return False, []
 
 
 # ---------------------------------------------------------------------------

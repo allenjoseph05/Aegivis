@@ -13,7 +13,7 @@ _OTEL_AVAILABLE = False
 
 
 def setup_tracing(
-    service_name: str = "agentblackbox-backend",
+    service_name: str = "aegivis-backend",
     endpoint: str = "http://localhost:4317",
 ) -> bool:
     """Initialize OTel tracer. Returns True if successful."""
@@ -46,7 +46,7 @@ def setup_tracing(
     except ImportError:
         logger.info(
             "opentelemetry packages not installed -- tracing disabled. "
-            "Install with: pip install 'agentblackbox-backend[observability]'"
+            "Install with: pip install 'aegivis-backend[observability]'"
         )
         return False
     except Exception as exc:
@@ -54,7 +54,7 @@ def setup_tracing(
         return False
 
 
-def get_tracer(name: str = "agentblackbox"):
+def get_tracer(name: str = "aegivis"):
     """Return real tracer or no-op tracer."""
     if _OTEL_AVAILABLE:
         try:

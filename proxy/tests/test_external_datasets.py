@@ -1,5 +1,5 @@
 """
-External dataset validation for the AgentBlackBox security scanner.
+External dataset validation for the Aegivis security scanner.
 
 Downloads real-world prompt injection / jailbreak datasets from HuggingFace
 and runs our scanner against them to measure TPR, FPR, and F1 in realistic
@@ -263,7 +263,7 @@ def print_report(result: DatasetResult) -> None:
 
 def main():
     print("\n" + "="*60)
-    print("  AgentBlackBox — External Dataset Validation")
+    print("  Aegivis — External Dataset Validation")
     print("  Structural scanner only (no GPU / sentence-transformers)")
     print("="*60)
 

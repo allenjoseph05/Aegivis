@@ -162,12 +162,16 @@ function getSummary(et: string, payload: Record<string, unknown>): string {
   return "";
 }
 
+const INITIAL_VISIBLE = 100;
+
 interface EventTimelineProps {
   events: AuditEvent[];
   loading?: boolean;
 }
 
 export function EventTimeline({ events, loading }: EventTimelineProps) {
+  const [showAll, setShowAll] = useState(false);
+
   if (loading) {
     return (
       <div className="space-y-1">
@@ -186,11 +190,22 @@ export function EventTimeline({ events, loading }: EventTimelineProps) {
     );
   }
 
+  const visible = showAll ? events : events.slice(0, INITIAL_VISIBLE);
+  const hidden = events.length - visible.length;
+
   return (
     <div className="space-y-0.5">
-      {events.map((event) => (
+      {visible.map((event) => (
         <EventRow key={event.event_id} event={event} />
       ))}
+      {hidden > 0 && (
+        <button
+          onClick={() => setShowAll(true)}
+          className="w-full mt-1 py-2 text-xs text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded-lg border border-dashed border-blue-200 transition-colors"
+        >
+          Show {hidden} more event{hidden !== 1 ? "s" : ""} ↓
+        </button>
+      )}
     </div>
   );
 }

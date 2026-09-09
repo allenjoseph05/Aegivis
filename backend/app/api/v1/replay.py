@@ -22,6 +22,12 @@ async def get_forensic_replay(
 ):
     """
     Generate a forensic replay report for a session, scoped to the authenticated org.
+
+    Fetches up to 50 000 events per session in one query. Full chain verification
+    and anomaly detection require all events to be in memory simultaneously, so
+    streaming / chunked pagination is not supported. Sessions larger than 50 000
+    events are uncommon in practice (~4 h+ of continuous agent operation) but if
+    encountered the endpoint will return a partial report for the first 50 000 events.
     """
     summary = await get_session_summary(db, session_id=session_id, org_id=org_ctx.org_id)
     if not summary:

@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agentblackbox-backend"
+name = "aegivis-backend"
 version = "1.0.0"
-description = "AgentBlackBox Backend — forensic audit storage and REST API"
+description = "Aegivis Backend — forensic audit storage and REST API"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 
@@ -24,7 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 redis = [
     # Redis Streams event pipeline + distributed session state
-    # Install with: pip install 'agentblackbox-backend[redis]'
+    # Install with: pip install 'aegivis-backend[redis]'
     "redis[asyncio]>=5.0",
 ]
 observability = [
@@ -43,7 +43,7 @@ dev = [
 ]
 
 [project.scripts]
-abb-backend = "app.main:app"
+aegivis-backend = "app.main:app"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

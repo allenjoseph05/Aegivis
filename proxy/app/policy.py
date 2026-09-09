@@ -1,5 +1,5 @@
 """
-Policy enforcement engine for AgentBlackBox proxy.
+Policy enforcement engine for Aegivis proxy.
 
 Rules are loaded from YAML files and evaluated against each event before/after
 forwarding to the LLM provider. When a BLOCK action fires, the proxy returns

@@ -1,8 +1,8 @@
 """
-AgentBlackBox Demo Agent (Ollama)
+Aegivis Demo Agent (Ollama)
 ==================================
 An agentic loop using Ollama (local LLM, no API key needed), routed through
-the AgentBlackBox proxy. Demonstrates full session tracking, tool call
+the Aegivis proxy. Demonstrates full session tracking, tool call
 interception, and security scanning in the dashboard.
 
 Requirements:
@@ -11,7 +11,7 @@ Requirements:
     Model pulled:   ollama pull llama3.2
 
 Usage:
-    cd AgentBlackBox
+    cd Aegivis
     python demo/agent.py
 
 What you'll see in the dashboard (http://localhost:5173):
@@ -176,9 +176,9 @@ def run_task(
         base_url=PROXY_BASE_URL,
     )
 
-    extra_headers = {"x-abb-agent-id": agent_id}
+    extra_headers = {"x-aegivis-agent-id": agent_id}
     if session_id:
-        extra_headers["x-abb-session-id"] = session_id
+        extra_headers["x-aegivis-session-id"] = session_id
 
     messages: list[dict] = []
     if system:
@@ -278,7 +278,7 @@ SCENARIOS = [
 
 
 def main():
-    print("\nAgentBlackBox Demo Agent (Ollama)")
+    print("\nAegivis Demo Agent (Ollama)")
     print("=" * 60)
     print(f"Proxy  : {PROXY_BASE_URL}")
     print(f"Model  : {MODEL}")

@@ -1,0 +1,65 @@
+{{- if .Values.controller.enabled }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "aegivis.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aegivis.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "aegivis.fullname" . }}-controller
+  labels:
+    {{- include "aegivis.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  # AgentSecurityPolicy CRD
+  - apiGroups: ["aegivis.io"]
+    resources: ["agentsecuritypolicies"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["aegivis.io"]
+    resources: ["agentsecuritypolicies/status"]
+    verbs: ["get", "patch", "update"]
+  # NetworkPolicy management
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Pod watching (for webhook target info)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Patch MutatingWebhookConfiguration with CA bundle
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    verbs: ["get", "list", "patch", "update"]
+  # kopf coordination (leases for leader election)
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # kopf event posting
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "aegivis.fullname" . }}-controller
+  labels:
+    {{- include "aegivis.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "aegivis.fullname" . }}-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aegivis.fullname" . }}-controller
+    namespace: {{ .Release.Namespace }}
+{{- end }}

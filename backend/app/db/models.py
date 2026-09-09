@@ -1,4 +1,4 @@
-"""SQLAlchemy 2.0 ORM models for AgentBlackBox."""
+"""SQLAlchemy 2.0 ORM models for Aegivis."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -34,7 +34,9 @@ class AuditEventORM(Base):
         Index("idx_session", "session_id", "sequence_number"),
         Index("idx_org_time", "org_id", "timestamp_ns"),
         Index("idx_event_type", "org_id", "event_type", "timestamp_ns"),
-        {"postgresql_partition_by": "RANGE (received_at)"},
+        # Note: TimescaleDB hypertable partitioning is applied by migration 0008
+        # via `SELECT create_hypertable(...)`. SQLAlchemy does not support the
+        # postgresql_partition_by key — it would be silently ignored.
     )
 
     event_id = Column(Text, primary_key=True)

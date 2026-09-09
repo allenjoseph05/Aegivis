@@ -1,7 +1,8 @@
 /**
- * useWebSocket — connects to the AgentBlackBox real-time alert stream.
+ * useWebSocket — connects to the Aegivis real-time alert stream.
  *
- * Automatically reconnects every 3 seconds on disconnect.
+ * Reconnects with exponential backoff (1s → 2s → 4s → … → 30s cap)
+ * after disconnect. Resets backoff delay on successful connection.
  * Keeps the last 50 messages in state.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -11,7 +12,8 @@ const WS_URL =
   `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws/alerts`;
 
 const MAX_MESSAGES = 50;
-const RECONNECT_DELAY_MS = 3000;
+const RECONNECT_BASE_MS  = 1_000;   // initial delay
+const RECONNECT_MAX_MS   = 30_000;  // cap
 
 export interface AlertMessage {
   id: string;
@@ -38,6 +40,7 @@ export function useWebSocket(): UseWebSocketReturn {
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryDelay = useRef(RECONNECT_BASE_MS);
   const unmounted = useRef(false);
 
   const connect = useCallback(() => {
@@ -47,7 +50,10 @@ export function useWebSocket(): UseWebSocketReturn {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      if (!unmounted.current) setConnected(true);
+      if (!unmounted.current) {
+        setConnected(true);
+        retryDelay.current = RECONNECT_BASE_MS;  // reset backoff on success
+      }
     };
 
     ws.onmessage = (event) => {
@@ -67,8 +73,9 @@ export function useWebSocket(): UseWebSocketReturn {
     ws.onclose = () => {
       if (unmounted.current) return;
       setConnected(false);
-      // Schedule reconnect
-      reconnectTimer.current = setTimeout(connect, RECONNECT_DELAY_MS);
+      // Exponential backoff: 1s → 2s → 4s → … → 30s
+      reconnectTimer.current = setTimeout(connect, retryDelay.current);
+      retryDelay.current = Math.min(retryDelay.current * 2, RECONNECT_MAX_MS);
     };
 
     ws.onerror = () => {

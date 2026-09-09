@@ -1,5 +1,5 @@
 """
-SHA-256 hash chain implementation for AgentBlackBox.
+SHA-256 hash chain implementation for Aegivis.
 
 Each event is linked to the previous via its hash, forming a tamper-evident chain.
 Any modification to a historical event causes all subsequent hashes to diverge.

@@ -92,3 +92,18 @@ class TestIngestEndpoint:
             "LLM_CALL_START", "LLM_CALL_END", "TOOL_CALL_START", "TOOL_CALL_END",
             "AGENT_FINISH", "SYSTEM_ERROR", "CHECKPOINT",
         }
+
+    @patch("app.api.v1.ingest.event_exists", new_callable=AsyncMock, return_value=True)
+    def test_duplicate_event_id_skipped_not_500(self, mock_exists):
+        """Duplicate event_id must be skipped gracefully (idempotent), not crash with 500."""
+        event = _make_event(0)
+        resp = client.post(
+            "/v1/events",
+            json={"events": [event], "batch_id": "batch_dup", "sent_at_ns": time.time_ns()},
+            headers=HEADERS,
+        )
+        # Should succeed — duplicate is skipped cleanly
+        assert resp.status_code == 202
+        data = resp.json()
+        assert data["accepted"] == 0
+        assert data["skipped"] == 1

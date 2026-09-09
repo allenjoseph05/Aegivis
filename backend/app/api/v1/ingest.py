@@ -5,6 +5,19 @@ Receives event batches from the proxy (and optionally the SDK).
 Validates schema, verifies hash chain continuity, and persists to PostgreSQL.
 On AGENT_FINISH: runs anomaly detection, persists flags, pushes WebSocket alerts,
 and sends email/Slack notifications (all fire-and-forget).
+
+Dual-path note
+--------------
+Events can reach the backend via two paths:
+  1. REST (this endpoint): proxy posts directly via httpx. Always-on fallback.
+  2. Redis Streams (stream_consumer.py): proxy publishes to a Redis stream and
+     the backend consumer reads and inserts them asynchronously.
+
+The transport layer in the proxy (transport.py) selects the path at startup.
+Both paths write to the same `audit_events` table. In practice, only one path
+is active at a time (Redis when available, REST as fallback), so ordering
+issues between the two paths are not expected. Events from the same session
+have a sequence_number field and the hash chain enforces ordering integrity.
 """
 from __future__ import annotations
 
@@ -66,7 +79,7 @@ async def ingest_events(
     org_ctx: OrgContext = Depends(require_api_key),
 ) -> IngestBatchResponse:
     """
-    Accepts a batch of audit events from the AgentBlackBox proxy.
+    Accepts a batch of audit events from the Aegivis proxy.
     Validates each event, checks for duplicates, and persists to PostgreSQL.
     Events whose org_id does not match the authenticated key are rejected.
     """

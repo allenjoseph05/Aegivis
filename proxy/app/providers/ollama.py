@@ -8,6 +8,25 @@ Ollama exposes an OpenAI-compatible chat endpoint at:
 We handle both formats:
 - /ollama/v1/... → OpenAI-compatible (reuse OpenAI parser)
 - /ollama/api/chat → Ollama native format
+
+**Known limitations (Ollama support is partial):**
+
+1. **Thinking blocks** — Ollama has no concept of reasoning traces. Extended
+   thinking is an Anthropic-specific feature. The ``thinking_blocks`` field in
+   LLM_CALL_END events will always be ``None`` for Ollama.
+
+2. **Structured tool_calls** — Ollama's native format returns tool calls
+   embedded in the ``message.tool_calls`` list. The OpenAI-compat path maps
+   them via the OpenAI parser. However, Ollama's tool-call format varies
+   across model versions and may not always populate ``function.name`` and
+   ``function.arguments`` correctly. Verify tool-call capture with your
+   specific model before relying on tool baseline enforcement.
+
+3. **stop_reason mapping** — Ollama uses ``done_reason`` (e.g. ``"stop"``,
+   ``"length"``) instead of OpenAI's ``finish_reason``. The native handler
+   maps ``done_reason`` → ``finish_reason``, but some Ollama versions return
+   ``null`` or omit the field entirely. Treat stop-reason-dependent logic
+   (like tool-call loop protection) as best-effort for Ollama.
 """
 from __future__ import annotations
 

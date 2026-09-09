@@ -6,6 +6,7 @@
  * Agents with no registration are visible in the topology as "unregistered".
  */
 import React, { useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   listAgents,
@@ -13,6 +14,7 @@ import {
   deleteAgent,
   type Agent,
 } from "../../api/client";
+import { OnboardingWizard } from "./OnboardingWizard";
 
 function ToolBadge({ tool }: { tool: string }) {
   return (
@@ -81,7 +83,7 @@ function RegisterForm({ onClose }: { onClose: () => void }) {
               onChange={(e) => setForm({ ...form, agent_id: e.target.value })}
             />
             <p className="text-xs text-gray-400 mt-0.5">
-              Must match the agent_id sent in <code>x-abb-agent-id</code> header
+              Must match the agent_id sent in <code>x-aegivis-agent-id</code> header
             </p>
           </div>
           <div>
@@ -159,7 +161,12 @@ function AgentCard({ agent, onDelete }: { agent: Agent; onDelete: () => void }) 
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="font-semibold text-gray-900 truncate">{agent.name}</h3>
+            <Link
+              to={`/agents/${agent.agent_id}`}
+              className="font-semibold text-gray-900 hover:text-blue-600 transition-colors truncate"
+            >
+              {agent.name}
+            </Link>
             <code className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
               {agent.agent_id}
             </code>
@@ -222,6 +229,7 @@ function AgentCard({ agent, onDelete }: { agent: Agent; onDelete: () => void }) 
 export function AgentsPage() {
   const qc = useQueryClient();
   const [showForm, setShowForm] = useState(false);
+  const [showWizard, setShowWizard] = useState(false);
   const [search, setSearch] = useState("");
 
   const agentsQ = useQuery({
@@ -248,21 +256,30 @@ export function AgentsPage() {
   return (
     <div className="p-6 max-w-4xl mx-auto">
       {showForm && <RegisterForm onClose={() => setShowForm(false)} />}
+      {showWizard && <OnboardingWizard onClose={() => setShowWizard(false)} />}
 
-      <div className="flex items-center justify-between mb-6">
-        <div>
+      <div className="flex items-start justify-between gap-4 flex-wrap mb-6">
+        <div className="min-w-0">
           <h1 className="text-2xl font-bold text-gray-900">Agent Registry</h1>
           <p className="text-sm text-gray-500 mt-1">
             Register agents to track their declared purpose and allowed tools.
             Unregistered agents appear with a warning in the Topology view.
           </p>
         </div>
-        <button
-          onClick={() => setShowForm(true)}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded font-medium"
-        >
-          + Register Agent
-        </button>
+        <div className="flex gap-2 flex-shrink-0">
+          <button
+            onClick={() => setShowWizard(true)}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded font-medium"
+          >
+            + New Agent
+          </button>
+          <button
+            onClick={() => setShowForm(true)}
+            className="px-4 py-2 border border-gray-200 text-gray-600 hover:bg-gray-50 text-sm rounded font-medium"
+          >
+            Quick add
+          </button>
+        </div>
       </div>
 
       {/* Stats bar */}
@@ -307,10 +324,16 @@ export function AgentsPage() {
           {agents.length === 0 ? (
             <>
               <div className="text-4xl mb-3">🤖</div>
-              <p className="font-medium">No agents registered yet</p>
-              <p className="text-sm mt-1">
-                Click "Register Agent" to add your first agent to the registry.
+              <p className="font-medium text-gray-700">No agents registered yet</p>
+              <p className="text-sm mt-1 text-gray-400">
+                Register an agent to start tracking its sessions, security posture, and tool usage.
               </p>
+              <button
+                onClick={() => setShowWizard(true)}
+                className="mt-4 px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg font-medium"
+              >
+                Register your first agent
+              </button>
             </>
           ) : (
             <p>No agents match your search.</p>
