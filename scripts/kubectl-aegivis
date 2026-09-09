@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# kubectl-aegivis — kubectl plugin for Aegivis AI Security Controller
+#
+# Install:
+#   cp scripts/kubectl-aegivis /usr/local/bin/kubectl-aegivis
+#   chmod +x /usr/local/bin/kubectl-aegivis
+#
+# Usage:
+#   kubectl aegivis status [-n NAMESPACE]
+#   kubectl aegivis violations [-n NAMESPACE] [-a AGENT] [-l LIMIT]
+#   kubectl aegivis audit [-a AGENT] [-f FRAMEWORK]
+#   kubectl aegivis inject POD -n NAMESPACE
+#   kubectl aegivis version
+
+set -euo pipefail
+
+# ── Resolve Python + aegivis-controller CLI ────────────────────────────────
+_CMD=""
+for candidate in aegivis-controller "python -m app.kubectl_plugin"; do
+  if command -v "${candidate%% *}" &>/dev/null 2>&1; then
+    _CMD="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$_CMD" ]]; then
+  echo "Error: aegivis-controller is not installed." >&2
+  echo "Install with: pip install aegivis-controller" >&2
+  exit 1
+fi
+
+# Pass all arguments through to the Python CLI
+exec $_CMD "$@"
