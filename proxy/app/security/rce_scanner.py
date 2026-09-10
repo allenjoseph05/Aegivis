@@ -475,45 +475,18 @@ _EXEC_ARG_NAMES: frozenset[str] = frozenset({
 # Safe-context tool name dampening
 # ---------------------------------------------------------------------------
 
-# Tool names that indicate a code-review / analysis context.
-# These tools are EXPECTED to receive and inspect code that contains dangerous
-# constructs (os.system, eval, subprocess, etc.) — it is the content being
-# analysed, not an attack payload.
-#
-# Without dampening, every code-review agent session triggers a false-positive
-# RCE BLOCK. With dampening (factor 0.50), the confidence drops below the
-# 0.70 default threshold:
-#   eval() in review_code  → 0.95 * 0.50 = 0.475  (safe, below threshold)
-#   eval() in run_command  → 0.95 * 1.00 = 0.950  (blocked — correct)
-_SAFE_CONTEXT_TOOL_NAMES: frozenset[str] = frozenset({
-    "review_code", "analyze_code", "lint_code", "check_code", "audit_code",
-    "inspect_code", "static_analysis", "code_review", "code_analysis",
-    "code_check", "code_audit", "code_quality", "security_review",
-    "security_audit", "security_check", "scan_code", "code_scan",
-    "run_linter", "run_tests", "execute_tests", "test_runner",
-    "format_code", "refactor_code", "explain_code", "document_code",
-    "read_file", "get_file_content", "read_code", "fetch_code",
-    "get_file", "open_file", "view_file", "cat_file",
-})
-
-# If a tool name CONTAINS any of these keywords, apply partial dampening.
-_SAFE_CONTEXT_KEYWORDS: tuple[str, ...] = (
-    "review", "analyze", "lint", "audit", "inspect",
-    "explain", "document", "format", "refactor",
-)
-
-
-def _safe_context_dampen(tool_name: str, confidence: float) -> float:
-    """
-    Reduce RCE confidence when the tool name implies a code-review context.
-
-    Returns the adjusted confidence. Never returns a value > the input.
-    """
-    name_lower = tool_name.lower().replace("-", "_")
-    if name_lower in _SAFE_CONTEXT_TOOL_NAMES:
-        return confidence * 0.50
-    if any(kw in name_lower for kw in _SAFE_CONTEXT_KEYWORDS):
-        return confidence * 0.60
+def apply_safe_context_dampening(
+    confidence: float,
+    tool_name: str,
+    manifest_tools: dict | None = None,
+) -> float:
+    """Reduce RCE confidence based on manifest-verified operation type, not tool name keywords."""
+    if manifest_tools and tool_name in manifest_tools:
+        op = manifest_tools[tool_name].get("op_type", "unknown")
+        if op == "transform":
+            return confidence * 0.50
+        if op in ("read", "query", "search"):
+            return confidence * 0.65
     return confidence
 
 
@@ -577,7 +550,7 @@ _MIN_SCAN_LEN = 8    # ignore trivially short strings
 _MAX_SCAN_LEN = 8192  # skip pathologically large blobs (e.g. base64 images)
 
 
-def scan(tool_name: str, tool_args: dict | str) -> RceScanResult:
+def scan(tool_name: str, tool_args: dict | str, manifest_tools: dict | None = None) -> RceScanResult:
     """
     Scan tool call arguments for remote code execution patterns.
 
@@ -630,10 +603,8 @@ def scan(tool_name: str, tool_args: dict | str) -> RceScanResult:
             arg_name, lang, boosted, patterns,
         )
 
-    # Apply safe-context dampening for code review / analysis tool names.
-    # A code-review tool SHOULD receive code with dangerous patterns — that is
-    # its job. Dampening prevents false-positive BLOCKs on legitimate usage.
-    best_conf = _safe_context_dampen(tool_name, best_conf)
+    # Apply safe-context dampening based on manifest-verified operation type.
+    best_conf = apply_safe_context_dampening(best_conf, tool_name, manifest_tools)
 
     detected = best_conf >= threshold
     if detected:
