@@ -11,6 +11,38 @@
 # Conditions use AND logic (all conditions must be true for rule to fire).
 
 rules:
+  # ── Blast Radius Guard — Excessive Agency Prevention (Phase 15) ────────────
+  # Fired directly by intercept.py; enabled: false here disables condition eval.
+  # intercept.py handles scoring and routes HIGH→HITL, CRITICAL→BLOCK.
+
+  - name: excessive-agency-block
+    event_types: ["TOOL_CALL_START"]
+    conditions: []
+    action: BLOCK
+    reason: "Blast radius CRITICAL: irreversible/high-scope action blocked. Requires human review."
+    enabled: false
+
+  - name: excessive-agency-alert
+    event_types: ["TOOL_CALL_START"]
+    conditions: []
+    action: ALERT
+    reason: "Blast radius MEDIUM: potentially destructive action detected. Monitor and review."
+    enabled: false
+
+  - name: compound-sequence-violation
+    event_types: ["TOOL_CALL_START"]
+    conditions: []
+    action: BLOCK
+    reason: "Compound action sequence detected — multi-step attack pattern identified across session."
+    enabled: false
+
+  - name: behavioral-baseline-violation
+    event_types: ["TOOL_CALL_START"]
+    conditions: []
+    action: ALERT
+    reason: "Tool call count deviates significantly from behavioral baseline (z-score exceeded threshold)."
+    enabled: false
+
   # ── Safety guardrails ──────────────────────────────────────────────────────
 
   - name: tool-call-loop-protection
@@ -306,6 +338,34 @@ rules:
     reason: "IFC: EXTERNAL-labeled content (from web/email/tool result) flowed into a privileged sink argument. Possible injection-driven exfiltration blocked."
     enabled: false  # fired directly by intercept.py Hook 3-IFC; conditions not evaluated by policy engine
 
+  # ── Source Accuracy Detection (Phase H) ──────────────────────────────────
+  # Fired directly by intercept.py when MiniCheck NLI scoring detects that
+  # the LLM response contains claims not supported by the tool results it
+  # received (response goes beyond or contradicts the actual tool data).
+  # Action controlled by AEGIVIS_SECURITY_HALLUCINATION_ACTION env var.
+  # Mode: AEGIVIS_SECURITY_HALLUCINATION_ACTION=alert (default) | block.
+  - name: hallucination-detected
+    event_types: ["LLM_CALL_END"]
+    conditions: []
+    action: ALERT
+    reason: "LLM response contains claims not supported by tool results — response accuracy relative to source data is low."
+    enabled: false  # fired directly by intercept.py; conditions not evaluated by policy engine
+
+  # ── Refusal Detection (Phase RAG-DoS) ────────────────────────────────────
+  # Fired directly by intercept.py when the LLM response is scored as a
+  # refusal (safety-alignment firing).  A cluster of refusals within a short
+  # time window is the observable footprint of a RAG-poison DoS campaign
+  # (Li et al., arXiv:2603.03919): adversaries inject safety-framing language
+  # into the knowledge base, triggering false-positive refusals on legitimate
+  # queries.  Action: ALERT (investigate knowledge base / ingestion pipeline).
+  # Toggle: AEGIVIS_SECURITY_REFUSAL_ENABLED (default true).
+  - name: refusal-detected
+    event_types: ["LLM_CALL_END"]
+    conditions: []
+    action: ALERT
+    reason: "LLM refused agent request. Sustained refusal rate may indicate RAG-poison DoS — audit the knowledge base for injected safety-framing documents."
+    enabled: false  # fired directly by intercept.py; conditions not evaluated by policy engine
+
   # ── Session PDG — multi-hop data exfil detection (Phase 10) ───────────────
   # Fired directly by intercept.py Hook C when the Session Program Dependence
   # Graph detects that content from an UNTRUSTED source (web_search, email_read,
@@ -318,3 +378,71 @@ rules:
     action: ALERT
     reason: "Session PDG detected a multi-hop data flow from an untrusted source to a sensitive sink — possible injection-driven exfiltration."
     enabled: false  # fired directly by intercept.py Hook C; conditions not evaluated by policy engine
+
+  # ── Embedding Security (Phase E4) ─────────────────────────────────────────
+  # Fired directly by the embeddings route handler when PII is detected in the
+  # text batch submitted to an embedding API (/v1/embeddings).  Agents that
+  # embed SSNs, credit cards, or other PII into vector stores cause that PII to
+  # be retrievable by any agent (or attacker) with access to the store.
+  # Action: ALERT (operator should decide whether to block based on risk).
+  # Toggle: AEGIVIS_SECURITY_EMBEDDING_ENABLED (default true).
+  - name: embedding-pii-detected
+    event_types: ["EMBEDDING_CALL"]
+    conditions: []
+    action: ALERT
+    reason: "PII detected in embedding input — sensitive data may be written to a vector store and become retrievable by other agents or users."
+    enabled: false  # fired directly by embeddings route handler
+
+  # ── Image Generation Security (Phase E5) ─────────────────────────────────
+  # Prompt injection into image generation APIs can cause the agent to generate
+  # harmful content or exfiltrate data as rendered text in the image.
+  - name: image-prompt-injection
+    event_types: ["IMAGE_GEN_CALL"]
+    conditions: []
+    action: ALERT
+    reason: "Injection signals detected in image generation prompt — may indicate adversarial prompt injected via compromised tool result."
+    enabled: false  # fired directly by image gen route handler
+
+  # ── Audio Security (Phase E5) ────────────────────────────────────────────
+  # PII in TTS input risks vocalising sensitive data. Injected audio in STT
+  # results introduces untrusted content into the agent context as trusted text.
+  - name: audio-pii-detected
+    event_types: ["AUDIO_CALL"]
+    conditions: []
+    action: ALERT
+    reason: "PII detected in audio API input — sensitive data may be vocalised or stored in audio output."
+    enabled: false  # fired directly by audio route handler
+
+  # ── Authorization Chain Verification (Phase 18) ──────────────────────────
+  # Fired directly by intercept.py when a HIGH-RISK tool call (network_send,
+  # auth_modify, code_exec, credential_access) has NO authorization signal in
+  # any prior user message or system prompt of this session.
+  # Action: ALERT (observe and log — low false-positive rate by design).
+  # The check is intentionally conservative: any matching token in any user
+  # message authorizes the intent class for the session lifetime.
+  - name: unauthorized-tool-call
+    event_types: ["TOOL_CALL_START"]
+    conditions: []
+    action: ALERT
+    reason: "Tool call intent not authorized by any human message or system prompt in this session."
+    enabled: false  # fired directly by intercept.py; conditions not evaluated by policy engine
+
+  # ── A2A Protocol Security (Phase E7) ────────────────────────────────────
+  # Cross-agent prompt injection: Agent A is hijacked by an injected tool result
+  # and relays the injected instruction to Agent B via A2A, escaping the
+  # security perimeter of Agent A's session.
+  - name: a2a-injection-detected
+    event_types: ["A2A_MESSAGE_SEND"]
+    conditions: []
+    action: ALERT
+    reason: "Prompt injection signals detected in A2A inter-agent message — possible cross-agent injection pivot attempt."
+    enabled: false  # fired directly by A2A route handler (BLOCK if security_a2a_block_injection=true)
+
+  # PII in A2A messages means sensitive data crosses agent trust boundaries
+  # without controls — the receiving agent may have broader permissions.
+  - name: a2a-pii-detected
+    event_types: ["A2A_MESSAGE_SEND", "A2A_MESSAGE_RECEIVE"]
+    conditions: []
+    action: ALERT
+    reason: "PII detected in A2A inter-agent message — sensitive data is crossing agent trust boundaries."
+    enabled: false  # fired directly by A2A route handler
