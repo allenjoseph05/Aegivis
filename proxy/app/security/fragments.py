@@ -3,12 +3,16 @@ Shared fragment extraction utility — used by session_pdg.py (Phase 10) and
 ifc_labels.py (Phase 11).
 
 A "fragment" is any sub-string of agent context content that is likely to be
-a meaningful data identifier: URL, email address, domain name, quoted string,
-or a long opaque token (hash, API key, UUID, base64 string).
+a meaningful data identifier: URL, email address, domain name, or quoted string.
 
 Both the PDG and IFC systems use these fragments to detect when data from an
 untrusted / external source flows verbatim into a privileged sink argument of
 a subsequent tool call.
+
+Note: Long bare token extraction (no-whitespace tokens ≥ 25 chars) was removed
+because it caught UUIDs, hashes, base64 strings, and API keys in benign tool
+outputs — too many FPs with no contextual signal. Structural flow detection
+relies on URL/email/domain/quoted-string fragments which have unambiguous context.
 """
 from __future__ import annotations
 
@@ -26,8 +30,7 @@ def extract_fragments(content: str) -> list[str]:
     Extract meaningful data fragments from *content*.
 
     Returns a deduplicated list of strings that are likely data identifiers:
-    URLs, email addresses, domain names, quoted strings ≥ _MIN_QUOTED_LEN,
-    and long continuous tokens ≥ _MIN_TOKEN_LEN.
+    URLs, email addresses, domain names, and quoted strings ≥ _MIN_QUOTED_LEN.
 
     Empty string or content with only short tokens returns [].
     """
@@ -69,10 +72,5 @@ def extract_fragments(content: str) -> list[str]:
     # Single-quoted strings (≥ _MIN_QUOTED_LEN chars)
     for m in re.finditer(r"'([^'\n]{%d,})'" % _MIN_QUOTED_LEN, content):
         _add(m.group(1))
-
-    # Long continuous tokens (no whitespace, ≥ _MIN_TOKEN_LEN chars)
-    # Catches tokens, hashes, base64 strings, API keys, UUIDs
-    for m in re.finditer(r'[^\s]{%d,}' % _MIN_TOKEN_LEN, content):
-        _add(m.group(0))
 
     return fragments
