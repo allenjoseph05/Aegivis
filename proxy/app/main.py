@@ -15,6 +15,7 @@ import functools
 import json
 import logging
 import os
+import random
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -27,6 +28,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .agent_identity import validate_agent_key
 from .config import settings
+from .shadow_router import fire_shadow_comparison
 from .intercept import InterceptContext
 from .policy import PolicyAction, get_policy_engine, reload_policy_engine
 from .tool_permissions import (
@@ -36,23 +38,55 @@ from .tool_permissions import (
 from .providers import (
     AnthropicProvider,
     AzureProvider,
+    CerebrasProvider,
+    CohereCompatProvider,
+    DeepSeekProvider,
+    FireworksProvider,
     GoogleProvider,
+    GroqProvider,
+    MistralProvider,
+    NvidiaProvider,
     OllamaProvider,
     OpenAIProvider,
+    OpenRouterProvider,
+    PerplexityProvider,
+    SambanovaProvider,
+    TogetherProvider,
+    VertexProvider,
+    XAIProvider,
 )
+from .providers.mcp import MCPProvider
 from .session import get_session_tracker
 from .transport import get_transport
+from .canonicalize import make_embedding_call, make_media_call, make_a2a_event
+from .hash_chain import compute_event_hash
+from .models import EventType as _EventType
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
 
 # Provider routing table
 PROVIDERS = {
-    "openai": (OpenAIProvider, settings.openai_upstream),
-    "anthropic": (AnthropicProvider, settings.anthropic_upstream),
-    "google": (GoogleProvider, settings.google_upstream),
-    "azure": (AzureProvider, settings.azure_upstream),
-    "ollama": (OllamaProvider, settings.ollama_upstream),
+    "openai":     (OpenAIProvider,    settings.openai_upstream),
+    "anthropic":  (AnthropicProvider, settings.anthropic_upstream),
+    "google":     (GoogleProvider,    settings.google_upstream),
+    "azure":      (AzureProvider,     settings.azure_upstream),
+    "ollama":     (OllamaProvider,    settings.ollama_upstream),
+    # OpenAI-compatible providers (Phase E1)
+    "groq":       (GroqProvider,       settings.groq_upstream),
+    "mistral":    (MistralProvider,    settings.mistral_upstream),
+    "together":   (TogetherProvider,   settings.together_upstream),
+    "perplexity": (PerplexityProvider, settings.perplexity_upstream),
+    "deepseek":   (DeepSeekProvider,   settings.deepseek_upstream),
+    "xai":        (XAIProvider,        settings.xai_upstream),
+    "fireworks":  (FireworksProvider,  settings.fireworks_upstream),
+    "openrouter": (OpenRouterProvider, settings.openrouter_upstream),
+    "cerebras":   (CerebrasProvider,   settings.cerebras_upstream),
+    "sambanova":  (SambanovaProvider,  settings.sambanova_upstream),
+    "nvidia":     (NvidiaProvider,     settings.nvidia_upstream),
+    "cohere":     (CohereCompatProvider, settings.cohere_upstream),
+    # Vertex AI uses dynamic upstream from path — listed here for /health visibility
+    "vertex":     (VertexProvider, "dynamic"),
 }
 
 # Headers that must not be forwarded upstream (proxy-internal or computed)
@@ -67,12 +101,27 @@ _HOP_BY_HOP = frozenset({
 })
 
 # Paths that trigger LLM interception (intercept these, passthrough everything else)
+_OPENAI_COMPAT_PATHS = {"/v1/chat/completions", "/v1/completions"}
+
 _INTERCEPT_PATHS = {
-    "openai": {"/v1/chat/completions", "/v1/completions"},
-    "anthropic": {"/v1/messages"},
-    "google": set(),   # matched by regex in route handler
-    "azure": {"/openai/deployments"},   # prefix match
-    "ollama": {"/v1/chat/completions", "/api/chat"},
+    "openai":     {"/v1/chat/completions", "/v1/completions"},
+    "anthropic":  {"/v1/messages"},
+    "google":     set(),   # matched by regex in route handler
+    "azure":      {"/openai/deployments"},   # prefix match
+    "ollama":     {"/v1/chat/completions", "/api/chat"},
+    # OpenAI-compatible providers (Phase E1)
+    "groq":       _OPENAI_COMPAT_PATHS,
+    "mistral":    _OPENAI_COMPAT_PATHS,
+    "together":   _OPENAI_COMPAT_PATHS,
+    "perplexity": _OPENAI_COMPAT_PATHS,
+    "deepseek":   _OPENAI_COMPAT_PATHS,
+    "xai":        _OPENAI_COMPAT_PATHS,
+    "fireworks":  _OPENAI_COMPAT_PATHS,
+    "openrouter": _OPENAI_COMPAT_PATHS,
+    "cerebras":   _OPENAI_COMPAT_PATHS,
+    "sambanova":  _OPENAI_COMPAT_PATHS,
+    "nvidia":     _OPENAI_COMPAT_PATHS,
+    "cohere":     _OPENAI_COMPAT_PATHS,
 }
 
 
@@ -433,6 +482,60 @@ async def _handle_non_streaming(
             },
         )
 
+    # ── Phase 19: Response-Hold HITL (non-streaming only) ────────────────────
+    # If a HITL approval was created during process_response() (blast_radius
+    # HIGH+ or explicit hitl_required_tools) AND response_hold_enabled is True,
+    # hold this response and poll until a human decides.
+    #
+    # Approved → release original response to agent (tool executes normally).
+    # Denied   → return synthetic denial response with no tool_calls so the
+    #             agent never attempts to execute the blocked action.
+    #
+    # This is the true pre-execution gate: the agent never receives tool_calls
+    # that have not been reviewed.  No retroactive blocking needed.
+    try:
+        _should_deny, _denial_body = await context.maybe_hold_response(
+            session_id=session_id,
+            agent_id=agent_id,
+            provider=provider_name,
+            model=model,
+        )
+        if _should_deny and _denial_body is not None:
+            return JSONResponse(
+                status_code=200,   # 200 so the agent SDK parses it normally
+                content=_denial_body,
+                headers={
+                    "X-Aegivis-Hold-Decision": "denied",
+                    "X-Aegivis-Session-ID": session_id,
+                },
+            )
+    except Exception as _hold_exc:
+        logger.warning("[RESPONSE-HOLD] Error in hold gate (continuing): %s", _hold_exc)
+
+    # ── Live Model Shadowing (fire-and-forget, zero hot-path latency) ──────────
+    if (
+        settings.shadow_enabled
+        and settings.shadow_model
+        and resp.status_code == 200
+        and random.random() < settings.shadow_sample_rate
+    ):
+        asyncio.create_task(
+            fire_shadow_comparison(
+                org_id=context.org_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                provider=provider_name,
+                upstream_url=str(upstream_url),
+                forward_headers=dict(forward_headers),
+                request_body_bytes=body_bytes,
+                primary_model=model,
+                primary_latency_ms=latency_ms,
+                primary_tokens=parsed_resp.get("total_tokens", 0) or 0,
+                primary_tool_calls=parsed_resp.get("tool_calls") or [],
+                primary_response_len=len(parsed_resp.get("response_text") or ""),
+            )
+        )
+
     return Response(
         content=resp.content,
         status_code=resp.status_code,
@@ -522,6 +625,699 @@ async def _handle_streaming(
 
 # ─── Route handlers ────────────────────────────────────────────────────────────
 
+
+async def _handle_image_gen(
+    request: Request,
+    provider_name: str,
+    upstream_base: str,
+) -> Response:
+    """
+    Phase E5 — Image generation route handler.
+
+    Scans the prompt for injection signals (adversary-injected text via tool
+    results) and PII (data-in-image exfiltration risk).  Forwards unconditionally;
+    fires ALERT violations on detection.
+    """
+    from .security.image_prompt_guard import (  # noqa: PLC0415
+        scan_image_prompt,
+        extract_image_prompt,
+    )
+    from .transport import get_best_transport as _get_best  # noqa: PLC0415
+
+    abb = _get_aegivis_headers(request)
+    if isinstance(abb, Response):
+        return abb
+
+    body_bytes = await request.body()
+    try:
+        body = json.loads(body_bytes) if body_bytes else {}
+    except json.JSONDecodeError:
+        body = {}
+
+    model = body.get("model", "dall-e-3")
+    tracker = get_session_tracker()
+    session_id = tracker.resolve_session(
+        explicit_session_id=abb["session_id"],
+        messages=[],
+        agent_id=abb["agent_id"],
+        parent_agent_id=abb["parent_agent_id"],
+        parent_session_id=abb["parent_session_id"],
+    )
+    state = tracker.get_state(session_id)
+
+    guard_result = None
+    if settings.security_image_gen_enabled:
+        prompt_text = extract_image_prompt(body)
+        guard_result = scan_image_prompt(prompt_text)
+
+    # Forward to upstream
+    upstream_url = f"{upstream_base}/v1/images/generations"
+    if request.url.query:
+        upstream_url += f"?{request.url.query}"
+    headers = _extract_headers(request)
+    t_start = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+            resp = await client.post(upstream_url, content=body_bytes, headers=headers)
+        latency_ms = (time.time() - t_start) * 1000
+        response_bytes = resp.content
+        http_status = resp.status_code
+        content_type = resp.headers.get("content-type", "application/json")
+    except Exception as exc:
+        logger.warning("Image gen upstream error: %s", exc)
+        return JSONResponse(status_code=502,
+                            content={"error": "upstream_error", "detail": str(exc)})
+
+    if settings.security_image_gen_enabled and guard_result is not None:
+        seq = state.sequence_number
+        prev_hash = state.last_hash
+        event = make_media_call(
+            event_type=_EventType.IMAGE_GEN_CALL,
+            session_id=session_id,
+            org_id=abb["org_id"],
+            agent_id=abb["agent_id"],
+            provider=provider_name,
+            model=model,
+            payload={
+                "prompt_chars":       guard_result.prompt_chars,
+                "injection_detected": guard_result.injection_detected,
+                "injection_score":    round(guard_result.injection_score, 4),
+            },
+            pii_detected=guard_result.pii_types,
+            http_status=http_status,
+            latency_ms=latency_ms,
+            sequence_number=seq,
+            previous_hash=prev_hash,
+        )
+        event["previous_hash"] = prev_hash
+        event["current_hash"] = compute_event_hash(event)
+        state.sequence_number += 1
+        state.last_hash = event["current_hash"]
+
+        transport = await _get_best()
+        transport.enqueue(event)
+
+        if guard_result.injection_detected:
+            transport.enqueue_violation({
+                "session_id": session_id, "agent_id": abb["agent_id"],
+                "org_id": abb["org_id"], "rule_name": "image-prompt-injection",
+                "action": "ALERT",
+                "reason": (
+                    f"Injection score {guard_result.injection_score:.2f} in image "
+                    f"prompt — possible adversarial injection via tool result."
+                ),
+                "severity": "HIGH", "event_type": "IMAGE_GEN_CALL", "model": model,
+                "provider": provider_name,
+            })
+            logger.warning(
+                "Image prompt injection [session=%s score=%.2f]",
+                session_id, guard_result.injection_score,
+            )
+
+        if guard_result.pii_detected:
+            transport.enqueue_violation({
+                "session_id": session_id, "agent_id": abb["agent_id"],
+                "org_id": abb["org_id"], "rule_name": "image-prompt-injection",
+                "action": "ALERT",
+                "reason": (
+                    f"PII ({', '.join(guard_result.pii_types)}) in image prompt "
+                    f"— may be rendered as text in the generated image."
+                ),
+                "severity": "HIGH", "event_type": "IMAGE_GEN_CALL", "model": model,
+                "provider": provider_name,
+            })
+
+    return Response(
+        content=response_bytes,
+        status_code=http_status,
+        media_type=content_type,
+        headers={"X-Aegivis-Session-ID": session_id},
+    )
+
+
+async def _handle_audio(
+    request: Request,
+    provider_name: str,
+    upstream_base: str,
+    direction: str,  # "tts" or "stt"
+) -> Response:
+    """
+    Phase E5 — Audio route handler (TTS and STT).
+
+    TTS (/v1/audio/speech): scan input text for PII before vocalisation.
+    STT (/v1/audio/transcriptions): forward multipart, scan response text
+      for PII and injection signals (injected audio attack surface).
+    """
+    from .security.image_prompt_guard import (  # noqa: PLC0415
+        scan_audio_input,
+        scan_image_prompt,  # reused for STT output injection scan
+    )
+    from .transport import get_best_transport as _get_best  # noqa: PLC0415
+
+    abb = _get_aegivis_headers(request)
+    if isinstance(abb, Response):
+        return abb
+
+    tracker = get_session_tracker()
+    session_id = tracker.resolve_session(
+        explicit_session_id=abb["session_id"],
+        messages=[],
+        agent_id=abb["agent_id"],
+        parent_agent_id=abb["parent_agent_id"],
+        parent_session_id=abb["parent_session_id"],
+    )
+    state = tracker.get_state(session_id)
+
+    body_bytes = await request.body()
+    model = "whisper-1" if direction == "stt" else "tts-1"
+
+    # TTS: scan request body text for PII before forwarding
+    tts_guard = None
+    if direction == "tts" and settings.security_audio_enabled:
+        try:
+            body = json.loads(body_bytes) if body_bytes else {}
+            model = body.get("model", "tts-1")
+            input_text = body.get("input", "")
+            tts_guard = scan_audio_input(str(input_text))
+        except Exception:
+            pass
+
+    # Forward to upstream
+    endpoint = "/v1/audio/speech" if direction == "tts" else "/v1/audio/transcriptions"
+    upstream_url = f"{upstream_base}{endpoint}"
+    if request.url.query:
+        upstream_url += f"?{request.url.query}"
+    headers = _extract_headers(request)
+    t_start = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+            resp = await client.post(upstream_url, content=body_bytes, headers=headers)
+        latency_ms = (time.time() - t_start) * 1000
+        response_bytes = resp.content
+        http_status = resp.status_code
+        content_type = resp.headers.get("content-type", "application/json")
+    except Exception as exc:
+        logger.warning("Audio upstream error (%s): %s", direction, exc)
+        return JSONResponse(status_code=502,
+                            content={"error": "upstream_error", "detail": str(exc)})
+
+    # STT: scan transcription text in the response
+    stt_injection_guard = None
+    stt_pii_guard = None
+    if direction == "stt" and settings.security_audio_enabled and http_status == 200:
+        try:
+            resp_body = json.loads(response_bytes)
+            transcript = resp_body.get("text", "")
+            if transcript:
+                stt_injection_guard = scan_image_prompt(transcript)  # injection scan
+                stt_pii_guard = scan_audio_input(transcript)          # PII scan
+        except Exception:
+            pass
+
+    if settings.security_audio_enabled:
+        pii_types: list[str] = []
+        if tts_guard and tts_guard.pii_detected:
+            pii_types = tts_guard.pii_types
+        elif stt_pii_guard and stt_pii_guard.pii_detected:
+            pii_types = stt_pii_guard.pii_types
+
+        payload: dict = {"direction": direction}
+        if tts_guard:
+            payload["input_chars"] = tts_guard.input_chars
+        if stt_injection_guard:
+            payload["transcript_injection_score"] = round(
+                stt_injection_guard.injection_score, 4
+            )
+
+        seq = state.sequence_number
+        prev_hash = state.last_hash
+        event = make_media_call(
+            event_type=_EventType.AUDIO_CALL,
+            session_id=session_id,
+            org_id=abb["org_id"],
+            agent_id=abb["agent_id"],
+            provider=provider_name,
+            model=model,
+            payload=payload,
+            pii_detected=pii_types,
+            http_status=http_status,
+            latency_ms=latency_ms,
+            sequence_number=seq,
+            previous_hash=prev_hash,
+        )
+        event["previous_hash"] = prev_hash
+        event["current_hash"] = compute_event_hash(event)
+        state.sequence_number += 1
+        state.last_hash = event["current_hash"]
+
+        transport = await _get_best()
+        transport.enqueue(event)
+
+        if pii_types:
+            transport.enqueue_violation({
+                "session_id": session_id, "agent_id": abb["agent_id"],
+                "org_id": abb["org_id"], "rule_name": "audio-pii-detected",
+                "action": "ALERT",
+                "reason": (
+                    f"PII ({', '.join(pii_types)}) detected in audio "
+                    f"{'input' if direction == 'tts' else 'transcription'}."
+                ),
+                "severity": "HIGH", "event_type": "AUDIO_CALL", "model": model,
+                "provider": provider_name,
+            })
+
+        if stt_injection_guard and stt_injection_guard.injection_detected:
+            transport.enqueue_violation({
+                "session_id": session_id, "agent_id": abb["agent_id"],
+                "org_id": abb["org_id"], "rule_name": "image-prompt-injection",
+                "action": "ALERT",
+                "reason": (
+                    f"Injection signals in STT transcription "
+                    f"(score={stt_injection_guard.injection_score:.2f}) — "
+                    f"possible injected-audio attack."
+                ),
+                "severity": "HIGH", "event_type": "AUDIO_CALL", "model": model,
+                "provider": provider_name,
+            })
+
+    return Response(
+        content=response_bytes,
+        status_code=http_status,
+        media_type=content_type,
+        headers={"X-Aegivis-Session-ID": session_id},
+    )
+
+
+async def _handle_embeddings(
+    request: Request,
+    provider_name: str,
+    upstream_base: str,
+) -> Response:
+    """
+    Phase E4 — Shared embedding route handler.
+
+    Intercepts /v1/embeddings calls for PII detection and audit logging.
+    Unlike LLM calls, embeddings are not blocked by default — the handler
+    fires an ALERT violation and logs an EMBEDDING_CALL event, but forwards
+    the request to upstream unconditionally (unless the proxy is in block mode).
+
+    Supported providers: openai, azure, cohere (OpenAI-compat /v1/embeddings).
+    Google Vertex embedContent uses a separate path and is handled by vertex_proxy.
+    """
+    from .security.embedding_guard import (  # noqa: PLC0415
+        scan_embedding_input,
+        extract_embedding_texts,
+    )
+    from .transport import get_best_transport as _get_best  # noqa: PLC0415
+
+    abb = _get_aegivis_headers(request)
+    if isinstance(abb, Response):
+        return abb
+
+    body_bytes = await request.body()
+    try:
+        body = json.loads(body_bytes) if body_bytes else {}
+    except json.JSONDecodeError:
+        body = {}
+
+    model = body.get("model", "text-embedding-ada-002")
+
+    # ── Resolve session (lightweight; no LLM_CALL_START event) ────────────────
+    tracker = get_session_tracker()
+    session_id = tracker.resolve_session(
+        explicit_session_id=abb["session_id"],
+        messages=[],
+        agent_id=abb["agent_id"],
+        parent_agent_id=abb["parent_agent_id"],
+        parent_session_id=abb["parent_session_id"],
+    )
+    state = tracker.get_state(session_id)
+
+    # ── PII scan ───────────────────────────────────────────────────────────────
+    pii_violation = None
+    guard_result = None
+    if settings.security_embedding_enabled:
+        texts = extract_embedding_texts(body)
+        guard_result = scan_embedding_input(texts)
+        state.embedding_call_count += 1
+
+    # ── Forward to upstream ────────────────────────────────────────────────────
+    upstream_url = f"{upstream_base}/v1/embeddings"
+    if request.url.query:
+        upstream_url += f"?{request.url.query}"
+
+    headers = _extract_headers(request)
+    t_start = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+            resp = await client.post(upstream_url, content=body_bytes, headers=headers)
+        latency_ms = (time.time() - t_start) * 1000
+        response_bytes = resp.content
+        http_status = resp.status_code
+        content_type = resp.headers.get("content-type", "application/json")
+    except Exception as exc:
+        logger.warning("Embedding upstream error: %s", exc)
+        return JSONResponse(
+            status_code=502,
+            content={"error": "upstream_error", "detail": str(exc)},
+        )
+
+    # ── Emit EMBEDDING_CALL audit event ────────────────────────────────────────
+    if settings.security_embedding_enabled and guard_result is not None:
+        seq = state.sequence_number
+        prev_hash = state.last_hash
+        event = make_embedding_call(
+            session_id=session_id,
+            org_id=abb["org_id"],
+            agent_id=abb["agent_id"],
+            provider=provider_name,
+            model=model,
+            input_count=guard_result.input_count,
+            total_chars=guard_result.total_chars,
+            pii_detected=guard_result.pii_types,
+            http_status=http_status,
+            latency_ms=latency_ms,
+            sequence_number=seq,
+            previous_hash=prev_hash,
+        )
+        event["previous_hash"] = prev_hash
+        event["current_hash"] = compute_event_hash(event)
+        state.sequence_number += 1
+        state.last_hash = event["current_hash"]
+
+        transport = await _get_best()
+        transport.enqueue(event)
+
+        # ── Fire PII violation if detected ─────────────────────────────────
+        if guard_result.pii_detected:
+            from .policy import PolicyViolation, PolicyAction  # noqa: PLC0415
+            severity = "CRITICAL" if guard_result.critical_pii else "HIGH"
+            pii_types_str = ", ".join(guard_result.pii_types)
+            violation_event = {
+                "session_id": session_id,
+                "agent_id":   abb["agent_id"],
+                "org_id":     abb["org_id"],
+                "rule_name":  "embedding-pii-detected",
+                "action":     "ALERT",
+                "reason":     (
+                    f"PII detected in embedding input ({pii_types_str}). "
+                    f"Sensitive data may be persisted in the vector store."
+                ),
+                "severity":   severity,
+                "event_type": "EMBEDDING_CALL",
+                "model":      model,
+                "provider":   provider_name,
+            }
+            transport.enqueue_violation(violation_event)
+            logger.warning(
+                "Embedding PII detected [session=%s agent=%s types=%s critical=%s]",
+                session_id, abb["agent_id"], pii_types_str, guard_result.critical_pii,
+            )
+
+        # ── Volume anomaly alert ────────────────────────────────────────────
+        threshold = settings.security_embedding_volume_threshold
+        if state.embedding_call_count >= threshold:
+            logger.warning(
+                "Embedding volume spike [session=%s count=%d threshold=%d]",
+                session_id, state.embedding_call_count, threshold,
+            )
+
+    return Response(
+        content=response_bytes,
+        status_code=http_status,
+        media_type=content_type,
+        headers={"X-Aegivis-Session-ID": session_id},
+    )
+
+
+async def _handle_a2a(request: Request) -> Response:
+    """
+    Phase E7 — A2A (Agent-to-Agent) Protocol proxy handler.
+
+    Intercepts Google A2A JSON-RPC 2.0 messages exchanged between autonomous
+    agents.  The calling agent sets ``X-A2A-Agent-URL`` to the actual target
+    agent endpoint; this proxy sits transparently in the middle.
+
+    Security checks performed on every ``tasks/send`` call:
+    - Structural prompt injection scan (delimiter anomaly + Unicode stego).
+    - PII detection (presidio-first; email + IBAN regex fallback).
+    - Response artifact text scanned for PII leakage.
+
+    BLOCK mode: enable ``AEGIVIS_SECURITY_A2A_BLOCK_INJECTION=true``.
+    Default: ALERT only (observe + audit without breaking delegation pipelines).
+    """
+    from .security.a2a_scanner import scan_a2a_request, scan_a2a_response  # noqa: PLC0415
+    from .transport import get_best_transport as _get_best                  # noqa: PLC0415
+
+    abb = _get_aegivis_headers(request)
+    if isinstance(abb, Response):
+        return abb
+
+    # The target A2A agent URL must be supplied by the calling agent.
+    target_url = request.headers.get("x-a2a-agent-url", "").strip()
+    if not target_url:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "missing_target",
+                "detail": (
+                    "Set X-A2A-Agent-URL header to the downstream A2A agent endpoint. "
+                    "Example: X-A2A-Agent-URL: http://my-agent.internal:8000"
+                ),
+            },
+        )
+
+    body_bytes = await request.body()
+    try:
+        body = json.loads(body_bytes) if body_bytes else {}
+    except json.JSONDecodeError:
+        body = {}
+
+    # ── Resolve session ────────────────────────────────────────────────────
+    tracker = get_session_tracker()
+    session_id = tracker.resolve_session(
+        explicit_session_id=abb["session_id"],
+        messages=[],
+        agent_id=abb["agent_id"],
+        parent_agent_id=abb["parent_agent_id"],
+        parent_session_id=abb["parent_session_id"],
+    )
+    state = tracker.get_state(session_id)
+
+    # ── Security scan (outgoing message) ──────────────────────────────────
+    scan = None
+    if settings.security_a2a_enabled:
+        scan = scan_a2a_request(body)
+
+    # BLOCK mode: reject if injection detected and block mode is on
+    if (
+        scan is not None
+        and scan.injection_triggered
+        and settings.security_a2a_block_injection
+    ):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "policy_violation",
+                "rule": "a2a-injection-detected",
+                "reason": (
+                    f"Prompt injection signals (score={scan.injection_score:.2f}) "
+                    f"detected in A2A message to {target_url}."
+                ),
+                "session_id": session_id,
+            },
+            headers={
+                "X-Aegivis-Policy-Rule": "a2a-injection-detected",
+                "X-Aegivis-Session-ID": session_id,
+            },
+        )
+
+    # ── Forward to target agent ────────────────────────────────────────────
+    forward_headers = _extract_headers(request)
+    # Strip our internal A2A header before forwarding to the real agent
+    forward_headers.pop("x-a2a-agent-url", None)
+
+    t_start = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+            resp = await client.post(
+                target_url,
+                content=body_bytes,
+                headers=forward_headers,
+            )
+        latency_ms = (time.time() - t_start) * 1000
+        response_bytes = resp.content
+        http_status = resp.status_code
+        content_type = resp.headers.get("content-type", "application/json")
+    except Exception as exc:
+        logger.warning("A2A upstream error [target=%s]: %s", target_url, exc)
+        return JSONResponse(
+            status_code=502,
+            content={"error": "upstream_error", "detail": str(exc)},
+        )
+
+    # ── Security scan (response artifacts) ────────────────────────────────
+    resp_scan = None
+    if settings.security_a2a_enabled and http_status == 200:
+        try:
+            resp_body = json.loads(response_bytes)
+            resp_scan = scan_a2a_response(resp_body)
+        except Exception:
+            pass
+
+    # ── Emit outgoing A2A audit event ──────────────────────────────────────
+    if settings.security_a2a_enabled and scan is not None:
+        transport = await _get_best()
+
+        seq = state.sequence_number
+        prev_hash = state.last_hash
+        send_event = make_a2a_event(
+            event_type=_EventType.A2A_MESSAGE_SEND,
+            session_id=session_id,
+            org_id=abb["org_id"],
+            agent_id=abb["agent_id"],
+            direction="send",
+            method=scan.method,
+            task_id=scan.task_id,
+            target_agent_url=target_url,
+            text_parts=scan.text_parts,
+            injection_score=scan.injection_score,
+            injection_triggered=scan.injection_triggered,
+            pii_detected=scan.pii_detected,
+            http_status=http_status,
+            latency_ms=latency_ms,
+            sequence_number=seq,
+            previous_hash=prev_hash,
+        )
+        send_event["current_hash"] = compute_event_hash(send_event)
+        state.sequence_number += 1
+        state.last_hash = send_event["current_hash"]
+        transport.enqueue(send_event)
+
+        if scan.injection_triggered:
+            severity = "CRITICAL" if scan.injection_score >= 0.80 else "HIGH"
+            transport.enqueue_violation({
+                "session_id": session_id, "agent_id": abb["agent_id"],
+                "org_id": abb["org_id"], "rule_name": "a2a-injection-detected",
+                "action": "BLOCK" if settings.security_a2a_block_injection else "ALERT",
+                "reason": (
+                    f"Prompt injection (score={scan.injection_score:.2f}) in A2A "
+                    f"message to {target_url} — possible cross-agent injection pivot."
+                ),
+                "severity": severity, "event_type": "A2A_MESSAGE_SEND",
+                "model": "a2a-protocol", "provider": "a2a",
+            })
+            logger.warning(
+                "A2A injection detected [session=%s score=%.2f target=%s]",
+                session_id, scan.injection_score, target_url,
+            )
+
+        if scan.pii_detected:
+            sev = "CRITICAL" if scan.critical_pii else "HIGH"
+            transport.enqueue_violation({
+                "session_id": session_id, "agent_id": abb["agent_id"],
+                "org_id": abb["org_id"], "rule_name": "a2a-pii-detected",
+                "action": "ALERT",
+                "reason": (
+                    f"PII ({', '.join(scan.pii_detected)}) in A2A message to "
+                    f"{target_url} — sensitive data crossing agent trust boundary."
+                ),
+                "severity": sev, "event_type": "A2A_MESSAGE_SEND",
+                "model": "a2a-protocol", "provider": "a2a",
+            })
+
+    # ── Emit response A2A audit event ──────────────────────────────────────
+    if settings.security_a2a_enabled and resp_scan is not None:
+        transport = await _get_best()
+
+        seq = state.sequence_number
+        prev_hash = state.last_hash
+        recv_event = make_a2a_event(
+            event_type=_EventType.A2A_MESSAGE_RECEIVE,
+            session_id=session_id,
+            org_id=abb["org_id"],
+            agent_id=abb["agent_id"],
+            direction="receive",
+            method=body.get("method", ""),
+            task_id=resp_scan.task_id,
+            target_agent_url=target_url,
+            artifact_texts=resp_scan.artifact_texts,
+            pii_detected=resp_scan.pii_detected,
+            http_status=http_status,
+            latency_ms=latency_ms,
+            sequence_number=seq,
+            previous_hash=prev_hash,
+        )
+        recv_event["current_hash"] = compute_event_hash(recv_event)
+        state.sequence_number += 1
+        state.last_hash = recv_event["current_hash"]
+        transport.enqueue(recv_event)
+
+        if resp_scan.pii_detected:
+            sev = "CRITICAL" if resp_scan.critical_pii else "HIGH"
+            transport.enqueue_violation({
+                "session_id": session_id, "agent_id": abb["agent_id"],
+                "org_id": abb["org_id"], "rule_name": "a2a-pii-detected",
+                "action": "ALERT",
+                "reason": (
+                    f"PII ({', '.join(resp_scan.pii_detected)}) in A2A response "
+                    f"from {target_url} — sensitive data received from peer agent."
+                ),
+                "severity": sev, "event_type": "A2A_MESSAGE_RECEIVE",
+                "model": "a2a-protocol", "provider": "a2a",
+            })
+
+    return Response(
+        content=response_bytes,
+        status_code=http_status,
+        media_type=content_type,
+        headers={"X-Aegivis-Session-ID": session_id},
+    )
+
+
+@app.api_route("/a2a", methods=["POST", "OPTIONS"])
+async def a2a_proxy(request: Request):
+    """
+    Phase E7 — A2A Protocol proxy endpoint.
+
+    Intercepts Google A2A JSON-RPC 2.0 inter-agent messages for security
+    scanning and forensic audit logging.
+
+    Set X-A2A-Agent-URL to the real target agent URL::
+
+        POST http://localhost:8080/a2a
+        X-A2A-Agent-URL: http://my-downstream-agent:8000
+        Content-Type: application/json
+
+        {"jsonrpc":"2.0","method":"tasks/send","params":{...}}
+    """
+    return await _handle_a2a(request)
+
+
+@app.api_route("/openai/v1/embeddings", methods=["POST", "OPTIONS"])
+async def openai_embeddings(request: Request):
+    """Phase E4 — Intercept OpenAI embedding calls for PII scanning + audit."""
+    return await _handle_embeddings(request, "openai", settings.openai_upstream)
+
+
+@app.api_route("/openai/v1/images/generations", methods=["POST", "OPTIONS"])
+async def openai_image_generations(request: Request):
+    """Phase E5 — Intercept image generation calls for prompt injection + PII."""
+    return await _handle_image_gen(request, "openai", settings.openai_upstream)
+
+
+@app.api_route("/openai/v1/audio/speech", methods=["POST", "OPTIONS"])
+async def openai_audio_speech(request: Request):
+    """Phase E5 — Intercept TTS calls for PII in vocalized text."""
+    return await _handle_audio(request, "openai", settings.openai_upstream, "tts")
+
+
+@app.api_route("/openai/v1/audio/transcriptions", methods=["POST", "OPTIONS"])
+async def openai_audio_transcriptions(request: Request):
+    """Phase E5 — Intercept STT calls; scan transcription result for PII + injection."""
+    return await _handle_audio(request, "openai", settings.openai_upstream, "stt")
+
+
 @app.api_route("/openai/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def openai_proxy(path: str, request: Request):
     downstream = f"/{path}"
@@ -564,6 +1360,506 @@ async def ollama_proxy(path: str, request: Request):
     if _should_intercept("ollama", downstream):
         return await _proxy_and_capture(request, "ollama", settings.ollama_upstream, downstream, OllamaProvider)
     return await _passthrough(request, settings.ollama_upstream, downstream)
+
+
+# ── OpenAI-compatible provider routes (Phase E1) ─────────────────────────────
+# All of these share the same OpenAI Chat Completions request/response format.
+# Routes are generated dynamically to avoid boilerplate.
+
+def _make_compat_route(provider_name: str, upstream_setting: str):
+    """Return a route handler closure for an OpenAI-compatible provider."""
+    _methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+
+    async def _handler(path: str, request: Request):
+        upstream = getattr(settings, upstream_setting)
+        downstream = f"/{path}"
+        provider_cls = PROVIDERS[provider_name][0]
+        if _should_intercept(provider_name, downstream):
+            return await _proxy_and_capture(request, provider_name, upstream, downstream, provider_cls)
+        return await _passthrough(request, upstream, downstream)
+
+    _handler.__name__ = f"{provider_name}_proxy"
+    return _handler
+
+
+_COMPAT_ROUTES = [
+    ("groq",       "groq_upstream"),
+    ("mistral",    "mistral_upstream"),
+    ("together",   "together_upstream"),
+    ("perplexity", "perplexity_upstream"),
+    ("deepseek",   "deepseek_upstream"),
+    ("xai",        "xai_upstream"),
+    ("fireworks",  "fireworks_upstream"),
+    ("openrouter", "openrouter_upstream"),
+    ("cerebras",   "cerebras_upstream"),
+    ("sambanova",  "sambanova_upstream"),
+    ("nvidia",     "nvidia_upstream"),
+    ("cohere",     "cohere_upstream"),
+]
+
+for _pname, _uattr in _COMPAT_ROUTES:
+    app.add_api_route(
+        f"/{_pname}/{{path:path}}",
+        _make_compat_route(_pname, _uattr),
+        methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    )
+
+
+# ── AWS Bedrock route (Phase E2) ──────────────────────────────────────────────
+
+import re as _re
+_BEDROCK_PATH_RE = _re.compile(
+    r"model/(.+?)/(converse-stream|converse|invoke-with-response-stream|invoke)$"
+)
+
+
+@app.api_route("/bedrock/{path:path}", methods=["GET", "POST", "OPTIONS"])
+async def bedrock_proxy(path: str, request: Request):
+    """
+    AWS Bedrock proxy route.
+
+    Accepts standard Bedrock HTTP requests from boto3 (set
+    AWS_ENDPOINT_URL_BEDROCK=http://localhost:8080/bedrock).
+
+    Incoming SigV4 Authorization headers are ignored — the proxy authenticates
+    to Bedrock using its own AWS credentials (see bedrock_gateway.py).
+
+    Supports:
+      POST /bedrock/model/{modelId}/converse
+      POST /bedrock/model/{modelId}/converse-stream   (buffered → JSON response)
+      POST /bedrock/model/{modelId}/invoke
+      POST /bedrock/model/{modelId}/invoke-with-response-stream (buffered)
+    """
+    from .providers.bedrock import (
+        BedrockProvider,
+        extract_converse_request,
+        parse_converse_response,
+        parse_invoke_request,
+        parse_invoke_response,
+        detect_model_family,
+    )
+    from .bedrock_gateway import (
+        forward_converse,
+        forward_converse_stream,
+        forward_invoke_model,
+        forward_invoke_model_stream,
+    )
+
+    abb = _get_aegivis_headers(request)
+    if isinstance(abb, Response):
+        return abb
+
+    body_bytes = await request.body()
+
+    limit = settings.max_request_body_bytes
+    if limit > 0 and len(body_bytes) > limit:
+        return JSONResponse(
+            status_code=413,
+            content={"error": "payload_too_large",
+                     "detail": f"Request body exceeds {limit} bytes limit."},
+        )
+
+    # Parse path: "model/{modelId}/{api_type}"
+    match = _BEDROCK_PATH_RE.search(path)
+    if not match:
+        # Passthrough for non-inference paths (e.g. list-foundation-models)
+        return JSONResponse(
+            status_code=404,
+            content={"error": "unsupported_bedrock_path",
+                     "detail": f"Aegivis Bedrock proxy only supports model inference paths. Got: /{path}"},
+        )
+
+    model_id = match.group(1)
+    api_type = match.group(2)   # converse | converse-stream | invoke | invoke-with-response-stream
+
+    try:
+        body = json.loads(body_bytes) if body_bytes else {}
+    except json.JSONDecodeError:
+        body = {}
+
+    # Extract canonical params for security scanning
+    is_invoke = api_type.startswith("invoke")
+    if is_invoke:
+        request_params = parse_invoke_request(model_id, body)
+    else:
+        request_params = extract_converse_request(model_id, body)
+
+    model = model_id
+
+    # Build intercept context
+    from .transport import get_best_transport as _get_best_transport
+    _transport = await _get_best_transport()
+    context = InterceptContext(
+        session_tracker=get_session_tracker(),
+        org_id=abb["org_id"],
+        transport=_transport,
+    )
+
+    # Synthesize a request dict that process_request understands
+    # (it mirrors the provider's extract_request_params output)
+    session_id, run_id, violations, forward_body = await context.process_request(
+        request_data=request_params,
+        provider="bedrock",
+        model=model,
+        agent_id=abb["agent_id"],
+        explicit_session_id=abb["session_id"],
+        parent_agent_id=abb["parent_agent_id"],
+        parent_session_id=abb["parent_session_id"],
+    )
+
+    # Block check
+    block_violations = [v for v in violations if v.action == PolicyAction.BLOCK]
+    if block_violations:
+        v = block_violations[0]
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error":      "policy_violation",
+                "rule":       v.rule_name,
+                "reason":     v.reason,
+                "session_id": session_id,
+            },
+            headers={
+                "X-Aegivis-Policy-Rule": v.rule_name,
+                "X-Aegivis-Session-ID":  session_id,
+            },
+        )
+
+    # If proxy modified the body (canary / spotlighting), rebuild Bedrock format
+    if forward_body is not None and not is_invoke:
+        from .providers.bedrock import rebuild_converse_body
+        body = rebuild_converse_body(forward_body, body)
+        body_bytes = json.dumps(body).encode("utf-8")
+
+    t_start = time.time()
+
+    try:
+        if api_type == "converse":
+            raw_response = await forward_converse(model_id, body)
+            parsed_resp  = parse_converse_response(raw_response)
+            response_bytes = json.dumps(raw_response).encode("utf-8")
+            content_type   = "application/json"
+
+        elif api_type == "converse-stream":
+            # Buffer stream → return as standard Converse JSON
+            raw_response = await forward_converse_stream(model_id, body)
+            parsed_resp  = parse_converse_response(raw_response)
+            response_bytes = json.dumps(raw_response).encode("utf-8")
+            content_type   = "application/json"
+
+        elif api_type == "invoke":
+            response_bytes = await forward_invoke_model(model_id, body_bytes)
+            raw_resp_body  = json.loads(response_bytes) if response_bytes else {}
+            parsed_resp    = parse_invoke_response(model_id, raw_resp_body)
+            content_type   = "application/json"
+
+        else:  # invoke-with-response-stream
+            response_bytes = await forward_invoke_model_stream(model_id, body_bytes)
+            raw_resp_body  = json.loads(response_bytes) if response_bytes else {}
+            parsed_resp    = parse_invoke_response(model_id, raw_resp_body)
+            content_type   = "application/json"
+
+    except RuntimeError as exc:
+        logger.error("Bedrock gateway error: %s", exc)
+        return JSONResponse(
+            status_code=502,
+            content={"error": "bedrock_gateway_error", "detail": str(exc)},
+        )
+
+    latency_ms = (time.time() - t_start) * 1000
+
+    await context.process_response(
+        session_id=session_id,
+        run_id=run_id,
+        provider="bedrock",
+        model=model,
+        agent_id=abb["agent_id"],
+        response_data=parsed_resp,
+        latency_ms=latency_ms,
+        http_status=200,
+    )
+
+    return Response(
+        content=response_bytes,
+        status_code=200,
+        media_type=content_type,
+        headers={"X-Aegivis-Session-ID": session_id},
+    )
+
+
+@app.api_route("/vertex/{path:path}", methods=["GET", "POST", "OPTIONS"])
+async def vertex_proxy(path: str, request: Request):
+    """
+    Google Vertex AI proxy (Phase E3).
+
+    Intercepts all Vertex AI generateContent/streamGenerateContent calls and
+    applies the full Aegivis security stack (injection, PII, output scan, etc.).
+
+    Auth: GCP OAuth2 Bearer token passes through unchanged — the proxy does NOT
+    need its own GCP credentials.  The upstream URL is constructed dynamically
+    from the {location} segment in the request path:
+
+        /vertex/v1beta1/projects/{proj}/locations/{loc}/publishers/google/models/{model}:generateContent
+        → https://{loc}-aiplatform.googleapis.com/v1beta1/projects/{proj}/...
+
+    SDK configuration:
+        # google-cloud-aiplatform
+        vertexai.init(project="proj", location="us-central1",
+                      api_endpoint="http://localhost:8080/vertex")
+
+        # google-genai unified SDK (v1.0+)
+        GOOGLE_GENAI_USE_VERTEXAI=1
+        GOOGLE_CLOUD_PROJECT=my-project
+        GOOGLE_CLOUD_LOCATION=us-central1
+        GOOGLE_GENAI_API_ENDPOINT=http://localhost:8080/vertex
+    """
+    from .providers.vertex import (  # noqa: PLC0415
+        VertexProvider as _VP,
+        build_upstream_url,
+        extract_model_from_path,
+    )
+
+    full_path = f"/{path}"
+
+    # Only intercept generateContent calls; pass everything else through
+    is_generate = "generateContent" in full_path or "streamGenerateContent" in full_path
+
+    # Construct dynamic upstream from the location in the path
+    upstream_base = build_upstream_url(full_path, default_location=settings.vertex_location)
+
+    if not is_generate:
+        return await _passthrough(request, upstream_base, full_path)
+
+    abb = _get_aegivis_headers(request)
+    if isinstance(abb, Response):
+        return abb
+
+    body_bytes = await request.body()
+    limit = settings.max_request_body_bytes
+    if limit > 0 and len(body_bytes) > limit:
+        return JSONResponse(
+            status_code=413,
+            content={"error": "payload_too_large",
+                     "detail": f"Request body exceeds {limit} bytes limit."},
+        )
+
+    try:
+        body = json.loads(body_bytes) if body_bytes else {}
+    except json.JSONDecodeError:
+        body = {}
+
+    model = extract_model_from_path(full_path)
+    request_params = _VP.extract_request_params(body, model=model)
+    is_stream = "streamGenerateContent" in full_path
+
+    from .transport import get_best_transport as _get_best_transport  # noqa: PLC0415
+    transport = await _get_best_transport()
+    context = InterceptContext(
+        session_tracker=get_session_tracker(),
+        transport=transport,
+        org_id=abb["org_id"],
+    )
+
+    session_id, run_id, violations, _forward_body = await context.process_request(
+        request_data=request_params,
+        provider="vertex",
+        model=model,
+        agent_id=abb["agent_id"],
+        explicit_session_id=abb["session_id"],
+        parent_agent_id=abb["parent_agent_id"],
+        parent_session_id=abb["parent_session_id"],
+    )
+    block_violations = [v for v in violations if v.action == PolicyAction.BLOCK]
+    if block_violations:
+        v = block_violations[0]
+        return JSONResponse(
+            status_code=403,
+            content={"error": "policy_violation", "rule": v.rule_name,
+                     "reason": v.reason, "session_id": session_id},
+            headers={"X-Aegivis-Policy-Rule": v.rule_name,
+                     "X-Aegivis-Session-ID": session_id},
+        )
+
+    headers = _extract_headers(request)
+    upstream_url = f"{upstream_base}{full_path}"
+    if request.url.query:
+        upstream_url += f"?{request.url.query}"
+
+    t_start = time.time()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
+        if is_stream:
+            # Streaming: assemble full response then return (same as Bedrock)
+            assembler = _VP.new_assembler()
+            async with client.stream("POST", upstream_url,
+                                     content=body_bytes, headers=headers) as resp:
+                if resp.status_code != 200:
+                    err_bytes = await resp.aread()
+                    latency_ms = (time.time() - t_start) * 1000
+                    await context.process_response(
+                        session_id=session_id, run_id=run_id, provider="vertex",
+                        model=model, agent_id=abb["agent_id"],
+                        response_data={"response_text": None, "finish_reason": "error",
+                                       "tool_calls": [], "token_usage": None},
+                        latency_ms=latency_ms, http_status=resp.status_code,
+                    )
+                    return Response(content=err_bytes, status_code=resp.status_code,
+                                    media_type=resp.headers.get("content-type"))
+                async for line in resp.aiter_lines():
+                    chunk = _VP.parse_sse_chunk(line)
+                    if chunk is not None and assembler.feed(chunk):
+                        break
+            parsed_resp = assembler.build_response()
+            response_bytes = json.dumps({"candidates": [], "_aegivis_streamed": True}).encode()
+            content_type = "application/json"
+        else:
+            resp = await client.post(upstream_url, content=body_bytes, headers=headers)
+            response_bytes = resp.content
+            content_type = resp.headers.get("content-type", "application/json")
+            try:
+                resp_body = json.loads(response_bytes)
+            except json.JSONDecodeError:
+                resp_body = {}
+            parsed_resp = _VP.parse_response(resp_body)
+            if resp.status_code != 200:
+                latency_ms = (time.time() - t_start) * 1000
+                await context.process_response(
+                    session_id=session_id, run_id=run_id, provider="vertex",
+                    model=model, agent_id=abb["agent_id"],
+                    response_data={"response_text": None, "finish_reason": "error",
+                                   "tool_calls": [], "token_usage": None},
+                    latency_ms=latency_ms, http_status=resp.status_code,
+                )
+                return Response(content=response_bytes, status_code=resp.status_code,
+                                media_type=content_type)
+
+    latency_ms = (time.time() - t_start) * 1000
+    await context.process_response(
+        session_id=session_id, run_id=run_id, provider="vertex",
+        model=model, agent_id=abb["agent_id"],
+        response_data=parsed_resp, latency_ms=latency_ms, http_status=200,
+    )
+
+    return Response(
+        content=response_bytes,
+        status_code=200,
+        media_type=content_type,
+        headers={"X-Aegivis-Session-ID": session_id},
+    )
+
+
+@app.api_route("/mcp", methods=["GET", "POST", "OPTIONS"])
+@app.api_route("/mcp/{path:path}", methods=["GET", "POST", "OPTIONS"])
+async def mcp_proxy(request: Request, path: str = ""):
+    """
+    MCP (Model Context Protocol) Streamable HTTP proxy.
+
+    Intercepts ``tools/call`` requests and applies Aegivis security policy
+    before forwarding to the real MCP server. All MCP interactions are logged
+    to the audit trail with session correlation.
+
+    Upstream MCP server resolved from (in priority order):
+        1. X-Aegivis-Mcp-Server  request header
+        2. AEGIVIS_MCP_SERVER_URL environment variable
+    """
+    import os as _os  # noqa: PLC0415
+
+    upstream = (
+        request.headers.get("x-aegivis-mcp-server")
+        or _os.environ.get("AEGIVIS_MCP_SERVER_URL", "")
+    ).rstrip("/")
+
+    if not upstream:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32603,
+                    "message": "No MCP server configured. Set X-Aegivis-Mcp-Server header or AEGIVIS_MCP_SERVER_URL.",
+                },
+            },
+        )
+
+    body_bytes = await request.body()
+    mcp_req    = MCPProvider.parse_request(body_bytes) if body_bytes else None
+
+    # ── GET = SSE stream subscription — forward directly ──────────────────
+    if request.method == "GET":
+        return await _passthrough(request, upstream, f"/{path}" if path else "")
+
+    # ── POST = JSON-RPC 2.0 message ───────────────────────────────────────
+    abb = _get_aegivis_headers(request)
+    if isinstance(abb, Response):
+        return abb
+
+    session_id = abb["session_id"] or f"mcp-{__import__('uuid').uuid4().hex[:12]}"
+    agent_id   = abb["agent_id"]
+    org_id     = abb["org_id"]
+
+    # Log + policy-check tools/call; pass everything else through after logging.
+    if mcp_req and mcp_req.method in MCPProvider.INTERCEPTED_METHODS:
+        audit_payload = MCPProvider.extract_audit_payload(mcp_req)
+        audit_payload["session_id"] = session_id
+        audit_payload["agent_id"]   = agent_id
+
+        # Apply tool policy for tools/call
+        if mcp_req.method == "tools/call" and mcp_req.tool_name:
+            tp_engine = get_tool_permissions_engine()
+            allowed, rule = tp_engine.check(mcp_req.tool_name, agent_id=agent_id, org_id=org_id)
+            if not allowed:
+                logger.info(
+                    "MCP tools/call BLOCKED: tool=%s agent=%s rule=%s",
+                    mcp_req.tool_name, agent_id, rule,
+                )
+                return JSONResponse(
+                    status_code=403,
+                    content=MCPProvider.build_policy_block_response(
+                        request_id=mcp_req.id,
+                        rule_name=rule or "tool-denied",
+                        reason=f"Tool '{mcp_req.tool_name}' is not permitted for agent '{agent_id}'",
+                    ),
+                )
+
+    # Forward to upstream MCP server
+    target_path = f"/{path}" if path else ""
+    forward_url = f"{upstream}{target_path}"
+    if request.url.query:
+        forward_url += f"?{request.url.query}"
+
+    forward_headers = _extract_headers(request)
+    # Preserve MCP session continuity header
+    if mcp_session := request.headers.get("mcp-session-id"):
+        forward_headers["mcp-session-id"] = mcp_session
+
+    accept = request.headers.get("accept", "application/json")
+    forward_headers["accept"] = accept
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+        try:
+            resp = await client.request(
+                method=request.method,
+                url=forward_url,
+                content=body_bytes,
+                headers=forward_headers,
+            )
+        except Exception as exc:
+            logger.warning("MCP upstream error: %s", exc)
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "jsonrpc": "2.0",
+                    "id": mcp_req.id if mcp_req else None,
+                    "error": {"code": -32603, "message": f"MCP upstream unreachable: {exc}"},
+                },
+            )
+
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers=dict(resp.headers),
+        media_type=resp.headers.get("content-type", "application/json"),
+    )
 
 
 async def _passthrough(request: Request, upstream_base: str, path: str) -> Response:
