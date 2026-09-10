@@ -26,12 +26,13 @@ manipulation or regex IP matching, which is the canonical evasion surface.
 from __future__ import annotations
 
 import ipaddress
+import ipaddress as _ipaddress
 import logging
 import re
 import socket
+import time
 import urllib.parse
 from dataclasses import dataclass, field
-from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -66,13 +67,26 @@ _PRIVATE_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
 
 # Cloud instance metadata endpoints — always blocked regardless of allowlist.
 # These endpoints serve IAM credentials and must never be reachable from agents.
-_CLOUD_METADATA_HOSTS: frozenset[str] = frozenset({
-    "169.254.169.254",           # AWS / GCP / Azure / DigitalOcean IMDS
-    "metadata.google.internal",  # GCP metadata
-    "169.254.170.2",             # ECS task metadata (AWS Fargate)
-    "fd00:ec2::254",             # AWS IPv6 IMDS
-    "metadata.internal",         # generic internal metadata alias
+_CLOUD_METADATA_NETWORKS: list = [
+    _ipaddress.ip_network("169.254.169.254/32"),
+    _ipaddress.ip_network("169.254.170.2/32"),
+    _ipaddress.ip_network("fd00:ec2::/32"),
+]
+_CLOUD_METADATA_HOSTNAMES: frozenset[str] = frozenset({
+    "metadata.google.internal",
+    "metadata.internal",
 })
+
+
+def _is_cloud_metadata(dest: str) -> bool:
+    d = dest.strip().lower()
+    if d in _CLOUD_METADATA_HOSTNAMES:
+        return True
+    try:
+        addr = _ipaddress.ip_address(d)
+        return any(addr in net for net in _CLOUD_METADATA_NETWORKS)
+    except ValueError:
+        return False
 
 # Regex to find URL-like strings within any text value.
 # Scope: URL DISCOVERY only — this is a preprocessing step to find candidates,
@@ -209,28 +223,38 @@ def _is_private(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# DNS resolution  (cached, synchronous — safe to call from a thread)
+# DNS resolution  (TTL-aware cache, synchronous — safe to call from a thread)
 # ---------------------------------------------------------------------------
 
-@lru_cache(maxsize=512)
+# DNS cache TTL: short enough to mitigate rebinding (attacker changes DNS after
+# first check passes), long enough not to thrash on repeated tool calls.
+_DNS_CACHE_TTL_S: float = 30.0
+
+_dns_cache: dict[str, tuple[tuple[str, ...], float]] = {}  # hostname → (ips, expires_at)
+
+
 def _resolve_host(hostname: str) -> tuple[str, ...]:
     """
     Resolve *hostname* to IP address strings.
-    Results are cached in an LRU cache (process lifetime, no TTL).
+    Results are cached with a 30-second TTL to mitigate DNS-rebinding attacks.
     Returns an empty tuple on resolution failure.
-
-    Note: TTL-aware caching would be ideal to defend against DNS-rebinding
-    within a cache window.  LRU is used here for simplicity; Phase 3.4 can
-    upgrade to a TTL-aware cache.
     """
+    now = time.monotonic()
+    cached = _dns_cache.get(hostname)
+    if cached and now < cached[1]:
+        return cached[0]
+
     try:
         results = socket.getaddrinfo(
             hostname, None,
             socket.AF_UNSPEC, socket.SOCK_STREAM,
         )
-        return tuple({r[4][0] for r in results})
+        ips = tuple({r[4][0] for r in results})
     except (socket.gaierror, OSError):
-        return ()
+        ips = ()
+
+    _dns_cache[hostname] = (ips, now + _DNS_CACHE_TTL_S)
+    return ips
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +307,7 @@ def _check_url(
     safe_url = _sanitise_url(url)
 
     # 1. Cloud metadata endpoint — always blocked, highest priority
-    if host in _CLOUD_METADATA_HOSTS:
+    if _is_cloud_metadata(host):
         return SsrfMatch(
             url=safe_url, host=host,
             reason=f"cloud_metadata_endpoint:{host}",
