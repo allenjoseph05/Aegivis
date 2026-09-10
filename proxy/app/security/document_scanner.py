@@ -20,7 +20,8 @@ DOCX / PPTX / ODT:
   2. Track changes — deleted text still present in XML (visible to LLM parser).
   3. Comments / annotations — injected into word/comments.xml.
   4. Metadata — dc:subject, dc:description in OOXML core properties.
-  5. Macro code (vbaProject.bin) — presence flagged regardless of content.
+  5. Macro code (vbaProject.bin) — removed: file presence is not a reliable
+     signal (Office creates empty stubs by default; binary VBA analysis needed).
 
 Graceful degradation
 --------------------
@@ -312,14 +313,10 @@ def _scan_docx(data: bytes, injection_fn: Callable[[str], float]) -> DocScanResu
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             names = set(z.namelist())
 
-            # ── Vector 2: Macro presence ───────────────────────────────────
-            if "word/vbaProject.bin" in names or "xl/vbaProject.bin" in names:
-                threats.append({
-                    "threat": "docx_macro_detected",
-                    "layer": "vbaProject",
-                    "score": 0.90,
-                    "snippet": "VBA macro binary found in document archive",
-                })
+            # Note: VBA macro file presence (vbaProject.bin) was removed —
+            # Office creates empty stubs by default; file presence alone is not
+            # a reliable signal. Only actual executable code would be meaningful,
+            # but we cannot safely analyze binary VBA here.
 
             # ── Vector 3: Comments ─────────────────────────────────────────
             for comments_path in ("word/comments.xml", "word/commentsExtended.xml"):
