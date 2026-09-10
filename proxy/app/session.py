@@ -101,7 +101,6 @@ class SessionState:
         "spawn_depth",              # int: 0 = root agent, N = Nth delegation level (Phase 6)
         # ── Runtime-only (not persisted; reset to defaults on proxy restart) ──
         "active_canaries",          # dict[run_id → canary_token]: cleared after each response
-        "event_type_sequence",      # list[str]: event types for Markov model
         "injection_score_history",  # list[float]: rolling per-turn injection scores
         "ml_injection_flag",        # bool: async ML classifier detected injection in prev turn
         "ml_injection_score",       # float: ML classifier score that set the flag
@@ -112,6 +111,14 @@ class SessionState:
         "hitl_pending_approval_id", # str | None: HITL approval UUID (Phase 9)
         "tools_hash",               # str | None: SHA-256[:16] of tools[] from first call
         "tools_set",                # frozenset[str] | None: tool names from first call
+        "tool_definitions",         # dict[str, str] | None: name→hash snapshot for rug-pull detection (Phase MCP)
+        "pii_vault",                # PIIVault | None: per-session PII token store (PII Redaction)
+        "session_tool_results",     # list[dict]: rolling window of ALL tool results seen this session; used by source accuracy detector; not persisted
+        "embedding_call_count",     # int: cumulative embedding API calls this session (Phase E4); not persisted
+        "blast_radius_cumulative",  # float: cumulative blast radius score this session (Phase 15 Blast Radius Guard); not persisted
+        "intent_history",           # list[str]: ordered intent classes of tool calls this session (Phase 23 Compound Sequence Detector); not persisted
+        "tool_call_counts",         # dict[str, int]: per-tool call count within session (Phase 20 Behavioral Baseline); not persisted
+        "auth_chain",               # AuthorizationChain | None: conversation authorization tracker (Phase 18); not persisted
     )
 
     def __init__(
@@ -135,7 +142,6 @@ class SessionState:
         self.last_seen_ns = self.started_at_ns
         self.first_user_hash = first_user_hash
         self.active_canaries: dict[str, str] = {}   # run_id -> canary token; not persisted
-        self.event_type_sequence: list[str] = []    # Markov model; not persisted
         self.max_injection_score: float = 0.0       # persisted; updated on each scan
         self.injection_score_history: list[float] = []  # rolling per-turn scores; not persisted
         self.ml_injection_flag: bool = False         # Phase 4; async ML classifier; not persisted
@@ -153,6 +159,14 @@ class SessionState:
         self.hitl_pending_approval_id: str | None = None   # Phase 9; HITL approval UUID; not persisted
         self.tools_hash: str | None = None                  # tool baseline; hash of tools[] from first call
         self.tools_set: frozenset[str] | None = None        # tool baseline; names from first call
+        self.tool_definitions: dict[str, str] | None = None  # rug-pull snapshot: name→definition_hash; not persisted
+        self.pii_vault = None                                # PIIVault | None; lazy-init; not persisted
+        self.session_tool_results: list[dict] = []          # source accuracy detector: rolling window of all tool results this session; never cleared; not persisted
+        self.embedding_call_count: int = 0                  # Phase E4; cumulative embedding API calls; not persisted
+        self.blast_radius_cumulative: float = 0.0           # Phase 15; cumulative blast radius score this session; not persisted
+        self.intent_history: list[str] = []                 # Phase 23; ordered intent classes of tool calls; not persisted
+        self.tool_call_counts: dict[str, int] = {}          # Phase 20; per-tool call count this session; not persisted
+        self.auth_chain = None                               # Phase 18; lazy-init AuthorizationChain; not persisted
 
     def to_dict(self) -> dict:
         return {
@@ -189,7 +203,6 @@ class SessionState:
         obj.last_seen_ns      = data.get("last_seen_ns", time.time_ns())
         obj.first_user_hash   = data.get("first_user_hash")
         obj.active_canaries         = {}     # not persisted; cleared per response
-        obj.event_type_sequence     = []     # not persisted; Markov model resets on restart
         obj.max_injection_score     = data.get("max_injection_score", 0.0)
         obj.injection_score_history = []     # not persisted; rolling per-turn scores
         obj.ml_injection_flag       = False  # not persisted; Phase 4 ML classifier flag
@@ -207,6 +220,14 @@ class SessionState:
         obj.hitl_pending_approval_id    = None  # not persisted; ephemeral per-call
         obj.tools_hash                  = None  # not persisted
         obj.tools_set                   = None  # not persisted
+        obj.tool_definitions            = None  # not persisted; rug-pull snapshot
+        obj.pii_vault                   = None  # not persisted; lazy-init PIIVault
+        obj.session_tool_results        = []    # not persisted; rebuilt from events as session continues
+        obj.embedding_call_count        = 0    # not persisted; Phase E4
+        obj.blast_radius_cumulative     = 0.0  # not persisted; Phase 15 Blast Radius Guard
+        obj.intent_history              = []   # not persisted; Phase 23 Compound Sequence Detector
+        obj.tool_call_counts            = {}   # not persisted; Phase 20 Behavioral Baseline
+        obj.auth_chain                  = None  # not persisted; Phase 18 Authorization Chain
         return obj
 
     def get_taint_tracker(self) -> "TaintTracker":
@@ -223,12 +244,26 @@ class SessionState:
             self.pdg = SessionPDG()
         return self.pdg
 
+    def get_pii_vault(self) -> "PIIVault":
+        """Return the session's PIIVault, creating it on first access."""
+        if self.pii_vault is None:
+            from .security.pii_redactor import PIIVault
+            self.pii_vault = PIIVault()
+        return self.pii_vault
+
     def get_ifc_context(self) -> "IFCContext":
         """Return the session's IFCContext, creating it on first access."""
         if self.ifc_context is None:
             from .security.ifc_labels import IFCContext
             self.ifc_context = IFCContext()
         return self.ifc_context
+
+    def get_auth_chain(self) -> "AuthorizationChain":
+        """Return the session's AuthorizationChain, creating it on first access."""
+        if self.auth_chain is None:
+            from .security.auth_chain import AuthorizationChain
+            self.auth_chain = AuthorizationChain()
+        return self.auth_chain
 
 
 class SessionTracker:
