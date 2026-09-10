@@ -507,3 +507,120 @@ class TestOllamaParseResponseNative:
         assert usage["prompt_tokens"] == 15
         assert usage["completion_tokens"] == 8
         assert usage["total_tokens"] == 23
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-Compatible providers (Phase E1)
+# ---------------------------------------------------------------------------
+
+class TestOpenAICompatProviders:
+    """All E1 compat providers reuse the OpenAI parser — verify each class works."""
+
+    PROVIDERS = [
+        "groq", "mistral", "together", "perplexity", "deepseek",
+        "xai", "fireworks", "openrouter", "cerebras", "sambanova",
+        "nvidia", "cohere",
+    ]
+
+    _CHAT_RESPONSE = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "Hello from compat provider"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+
+    _TOOL_RESPONSE = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "search", "arguments": '{"q":"test"}'},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+    }
+
+    def _get_provider(self, name: str):
+        from proxy.app.providers.openai_compat import make_compat_provider
+        return make_compat_provider(name)
+
+    def test_all_providers_have_correct_name(self):
+        for name in self.PROVIDERS:
+            cls = self._get_provider(name)
+            assert cls.name == name
+
+    def test_parse_response_text(self):
+        for name in self.PROVIDERS:
+            cls = self._get_provider(name)
+            result = cls.parse_response(self._CHAT_RESPONSE)
+            assert result["response_text"] == "Hello from compat provider"
+            assert result["finish_reason"] == "stop"
+            assert result["tool_calls"] == []
+
+    def test_parse_response_tool_calls(self):
+        for name in self.PROVIDERS:
+            cls = self._get_provider(name)
+            result = cls.parse_response(self._TOOL_RESPONSE)
+            assert result["finish_reason"] == "tool_calls"
+            assert len(result["tool_calls"]) == 1
+            assert result["tool_calls"][0]["name"] == "search"
+            assert result["tool_calls"][0]["arguments"] == '{"q":"test"}'
+
+    def test_extract_request_params(self):
+        body = {
+            "model": "llama3-8b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+        }
+        for name in self.PROVIDERS:
+            cls = self._get_provider(name)
+            params = cls.extract_request_params(body)
+            assert params["model"] == "llama3-8b"
+            assert params["stream"] is False
+            assert len(params["messages"]) == 1
+
+    def test_sse_assembler_produces_text(self):
+        chunks = [
+            '{"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}',
+            '{"choices":[{"delta":{"content":" world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}',
+        ]
+        for name in self.PROVIDERS:
+            cls = self._get_provider(name)
+            asm = cls.new_assembler()
+            for raw in chunks:
+                parsed = cls.parse_sse_chunk(raw)
+                asm.feed(parsed)
+            result = asm.build_response()
+            assert result["response_text"] == "Hello world"
+            assert result["finish_reason"] == "stop"
+
+    def test_provider_classes_are_importable_from_package(self):
+        from proxy.app.providers import (
+            GroqProvider, MistralProvider, TogetherProvider, PerplexityProvider,
+            DeepSeekProvider, XAIProvider, FireworksProvider, OpenRouterProvider,
+            CerebrasProvider, SambanovaProvider, NvidiaProvider, CohereCompatProvider,
+        )
+        assert GroqProvider.name == "groq"
+        assert MistralProvider.name == "mistral"
+        assert TogetherProvider.name == "together"
+        assert PerplexityProvider.name == "perplexity"
+        assert DeepSeekProvider.name == "deepseek"
+        assert XAIProvider.name == "xai"
+        assert FireworksProvider.name == "fireworks"
+        assert OpenRouterProvider.name == "openrouter"
+        assert CerebrasProvider.name == "cerebras"
+        assert SambanovaProvider.name == "sambanova"
+        assert NvidiaProvider.name == "nvidia"
+        assert CohereCompatProvider.name == "cohere"
