@@ -23,6 +23,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .session_pdg import is_network_destination_value
+
 
 @dataclass
 class TaintedValue:
@@ -43,19 +45,6 @@ class TaintHit:
 # ---------------------------------------------------------------------------
 # Network sink detection
 # ---------------------------------------------------------------------------
-
-_SINK_NAME_RE = re.compile(
-    r"http|request|fetch|curl|send|email|mail|webhook|upload|"
-    r"push|publish|notify|slack|teams|discord|sms|forward|relay|export",
-    re.IGNORECASE,
-)
-
-_SINK_ARG_KEYS: frozenset[str] = frozenset({
-    "url", "endpoint", "webhook", "webhook_url", "uri",
-    "destination", "target", "to", "recipient", "address",
-    "server", "api_url", "base_url", "callback", "callback_url",
-})
-
 
 # ---------------------------------------------------------------------------
 # TaintTracker
@@ -103,9 +92,16 @@ class TaintTracker:
         return hits
 
     def _is_network_sink(self, tool_name: str, args: dict[str, Any]) -> bool:
-        if _SINK_NAME_RE.search(tool_name):
-            return True
-        return any(k in _SINK_ARG_KEYS for k in args)
+        """True if any arg value is a remote network destination (URL or email).
+
+        File paths and shell commands are NOT network sinks — data stays local.
+        Classification is purely value-structural, not tool-name-based.
+        """
+        return any(
+            is_network_destination_value(v)
+            for v in args.values()
+            if isinstance(v, str)
+        )
 
 
 # ---------------------------------------------------------------------------
