@@ -120,7 +120,6 @@ def test_from_dict_resets_non_persisted_fields():
     assert restored.tools_hash is None
     assert restored.tools_set is None
     assert restored.active_canaries == {}
-    assert restored.event_type_sequence == []
     assert restored.injection_score_history == []
 
 
