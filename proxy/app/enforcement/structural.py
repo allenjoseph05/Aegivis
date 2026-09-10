@@ -39,8 +39,27 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Unicode "Format" category chars — zero-width joiners, directional marks,
-# BOM, soft hyphens, etc. Normal prose never contains these.
+# BOM, soft hyphens, etc.
 _ANOMALOUS_UNICODE_CATEGORIES: frozenset[str] = frozenset({"Cf"})
+
+# Benign Cf characters that appear frequently in legitimate content and MUST
+# be excluded from the invisible-character density score to avoid FPs:
+#   U+200D ZWJ   — family/compound emoji (👨‍👩‍👧‍👦) → every emoji sequence
+#   U+200B ZWSP  — web page line-break hints, mobile formatting
+#   U+200C ZWNJ  — Arabic/Farsi glyph shaping (mandatory for correct rendering)
+#   U+00AD       — soft hyphen (HTML &shy; — common in European-language text)
+#   U+FEFF       — BOM / ZERO WIDTH NO-BREAK SPACE (UTF-8 file header)
+#
+# Directional override/isolate chars (U+202A–U+202E, U+2066–U+2069) are
+# handled by sig_override with a heavier weight; they are NOT excluded here
+# so they still contribute to sig_invisible as a secondary signal.
+_BENIGN_CF_CHARS: frozenset[str] = frozenset({
+    "\u200d",   # ZERO WIDTH JOINER — emoji sequences
+    "\u200b",   # ZERO WIDTH SPACE — web formatting
+    "\u200c",   # ZERO WIDTH NON-JOINER — Arabic/Farsi shaping
+    "\u00ad",   # SOFT HYPHEN — typography
+    "\ufeff",   # BOM / ZERO WIDTH NO-BREAK SPACE
+})
 
 # Directional override codepoints — used to visually reverse / hide text.
 _DIRECTION_OVERRIDE_CHARS: frozenset[str] = frozenset({
@@ -77,24 +96,24 @@ _LLM_DELIMITERS: tuple[str, ...] = (
     "<|start_header_id|>", "<|end_header_id|>",
     # Google Gemma
     "<start_of_turn>", "<end_of_turn>",
-    # Alpaca / Stanford
+    # Alpaca / Stanford  (no-space variants only — space variants match Markdown headers)
     "###SYSTEM",    "###INSTRUCTION", "###HUMAN", "###ASSISTANT",
-    "### SYSTEM",   "### INSTRUCTION", "### HUMAN", "### ASSISTANT",
-    "### Instruction:", "### Response:",
-    # Vicuna / generic role markers
-    "<human>",      "<bot>",
-    "<assistant>",  "</assistant>",
     # Falcon / Open-Assistant
     "<|prompter|>", "<|endofprompt|>",
     # Structured prompt tokens
     "[SYSTEM]",     "[USER]",         "[ASSISTANT]",
     "[OVERRIDE]",   "[ADMIN",
     "[BEGIN NEW PROMPT]", "[END NEW PROMPT]",
-    # HTML/XML-style injection wrappers
-    "<instructions>", "</instructions>",
-    "<system>",     "</system>",
-    # Generic BOS/EOS
-    "</s>",         "<s>",
+    # NOTE: The following tokens were removed to prevent false positives on
+    # legitimate content:
+    #   <s>, </s>           — HTML strikethrough tags (common in web content)
+    #   <system>, </system> — XML config tags (Ansible, SOAP, etc.)
+    #   <instructions>, </instructions> — XML documentation
+    #   <human>, <bot>, <assistant>, </assistant> — appear in chatbot API docs
+    #   ### SYSTEM, ### INSTRUCTION, ### HUMAN, ### ASSISTANT (space variants)
+    #                       — match Markdown section headers like "### System Requirements"
+    #   ### Instruction:, ### Response: — common in API documentation
+    # These are still detected when combined with unambiguous tokens above.
 )
 
 
@@ -172,9 +191,13 @@ def _structural_score(text: str) -> tuple[float, StructuralScanResult]:
     n = len(text)
 
     # Signal a: format-character density (invisible Unicode)
+    # Exclude benign Cf chars (ZWJ for emoji, ZWSP for web formatting, soft
+    # hyphen for typography, BOM for file headers) to avoid FPs on legitimate
+    # web content. Directional overrides are caught by sig_override below.
     invisible = sum(
         1 for ch in text
         if unicodedata.category(ch) in _ANOMALOUS_UNICODE_CATEGORIES
+        and ch not in _BENIGN_CF_CHARS
     )
     sig_invisible = min(1.0, invisible / max(n * 0.005, 1))
 
