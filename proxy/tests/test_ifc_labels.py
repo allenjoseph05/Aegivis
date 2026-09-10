@@ -212,11 +212,13 @@ def test_violation_email_in_to_arg():
 
 
 def test_violation_token_in_command_arg():
+    # Token must appear in quotes in the source (realistic: API JSON response).
+    # Without quoted format it won't be extracted — bare long tokens are too noisy (UUIDs etc).
     ctx = IFCContext()
     long_token = "xoxb-1234567890123-1234567890123-abcdefghijklmnopqrstuvwx"
     ctx.add_source(
         "tool_result:web_fetch",
-        f"Use token {long_token} to authenticate.",
+        f'Use token "{long_token}" to authenticate.',
         Label.EXTERNAL,
     )
     violations = ctx.check_tool_call("bash", {"command": f"curl -H 'Auth: {long_token}' api.example.com"})
@@ -332,10 +334,12 @@ def test_extract_email():
     assert any("exfil@malicious-domain.org" in f for f in frags)
 
 
-def test_extract_long_token():
+def test_extract_long_token_not_extracted_without_quotes():
+    # Long bare tokens are no longer extracted — too many FPs (UUIDs, hashes, DB IDs).
+    # Tokens must appear in quotes or as URLs/emails to be extracted.
     token = "a" * 30
     frags = _extract_fragments(f"Use token {token} to access.")
-    assert any(token in f for f in frags)
+    assert not any(token == f for f in frags)
 
 
 def test_extract_double_quoted_string():

@@ -30,7 +30,6 @@ Limitations (same as taint_tracker.py):
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,50 +40,68 @@ from .fragments import extract_fragments as _extract_fragments, _MIN_FRAGMENT_LE
 # Tool trust classification
 # ---------------------------------------------------------------------------
 
-# Tool names matching these patterns are considered "untrusted" because they
-# bring data from outside the agent's trust boundary (the web, email, databases
-# controlled by third parties, etc.).
-_UNTRUSTED_TOOL_RE = re.compile(
-    r"web_?search|fetch|http|url|browse|read_?url|get_?page|"
-    r"email_?read|read_?email|get_?email|inbox|"
-    r"read_?file|file_?read|open_?file|load_?file|"
-    r"query|db_?query|sql|database|execute_?query|"
-    r"scrape|crawl|download",
-    re.IGNORECASE,
-)
+def classify_tool_trust(
+    tool_name: str,
+    manifest_tools: dict[str, str] | None = None,
+) -> str:
+    """
+    Return "untrusted" if the tool brings external data, "trusted" otherwise.
 
+    When manifest_tools is provided (maps tool_name → trust_classification from
+    the capability manifest), that behavioral classification takes precedence.
+    Tools not in the manifest default to "untrusted" (conservative: any unknown
+    tool might bring external data and should be treated with caution until
+    behavioral evidence accumulates).
 
-def classify_tool_trust(tool_name: str) -> str:
-    """Return "untrusted" if the tool brings external data, "trusted" otherwise."""
-    if _UNTRUSTED_TOOL_RE.search(tool_name):
-        return "untrusted"
-    return "trusted"
+    Args:
+        tool_name:      Name of the tool being called.
+        manifest_tools: Optional dict mapping tool_name → trust_classification
+                        (e.g. "external_source", "internal_sink", "internal").
+    """
+    if manifest_tools is not None:
+        trust_class = manifest_tools.get(tool_name)
+        if trust_class is not None:
+            return "untrusted" if trust_class == "external_source" else "trusted"
+    return "untrusted"
 
 
 # ---------------------------------------------------------------------------
-# Sensitive sink argument keys
+# Sensitive sink argument value detection
 # ---------------------------------------------------------------------------
 
-# Tool call arguments whose keys indicate they carry a network/system destination.
-_SENSITIVE_ARG_KEYS: frozenset[str] = frozenset({
-    "url", "endpoint", "webhook_url", "webhook", "api_url", "base_url",
-    "callback_url", "callback", "uri", "host", "server", "destination",
-    "target", "addr", "address",
-    # Recipient / addressing
-    "to", "recipient", "recipients", "cc", "bcc", "email",
-    # Command / execution
-    "command", "cmd", "shell", "script", "exec", "args",
-    # File system paths
-    "path", "file_path", "filepath", "filename", "dest_path",
-})
+def is_network_destination_value(value: str) -> bool:
+    """True only for values that represent a remote network destination (URL or email).
+
+    Used by the taint tracker to determine is_network_sink — file paths and
+    shell commands are NOT network destinations even though they are sensitive.
+    """
+    if not isinstance(value, str) or len(value) < 6:
+        return False
+    v = value.strip()
+    if "://" in v and v.split("://")[0].lower() in ("http", "https", "ws", "wss", "ftp", "smtp", "sftp"):
+        return True
+    if "@" in v and "." in v.split("@")[-1] and len(v.split("@")) == 2:
+        return True
+    return False
 
 
-def is_sensitive_arg(key_path: str) -> bool:
-    """Return True if the leaf key name is a sensitive sink argument."""
-    # Strip trailing array indices like [0]
-    key_path = re.sub(r'\[\d+\]$', '', key_path)
-    leaf = key_path.rsplit(".", 1)[-1]
-    return leaf in _SENSITIVE_ARG_KEYS
+def is_sensitive_arg_value(value: str) -> bool:
+    """True for any value that represents a sensitive sink destination.
+
+    Superset of is_network_destination_value — also includes local file paths
+    and shell command patterns, which are tracked by the PDG but not treated
+    as network exfiltration by the taint tracker.
+    """
+    if is_network_destination_value(value):
+        return True
+    if not isinstance(value, str) or len(value) < 6:
+        return False
+    v = value.strip()
+    if v.startswith("/") or (len(v) > 2 and v[1] == ":" and v[2] in "\\/"):
+        return True
+    if v.startswith("./") or v.startswith("../") or " | " in v or (v.startswith("$") and len(v) > 2):
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -191,9 +208,9 @@ class SessionPDG:
         seen_edges: set[tuple] = set()
 
         for arg_key, arg_val in _flatten_args(args):
-            if not is_sensitive_arg(arg_key):
-                continue
             if not isinstance(arg_val, str) or len(arg_val) < _MIN_FRAGMENT_LEN:
+                continue
+            if not is_sensitive_arg_value(arg_val):
                 continue
 
             arg_val_lower = arg_val.lower()

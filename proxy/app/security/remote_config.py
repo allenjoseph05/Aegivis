@@ -64,13 +64,34 @@ class SecurityConfig:
     pii_detection_enabled: bool = True
     unicode_stego_enabled: bool = True
     document_scan_enabled: bool = True
+    multimodal_scan_enabled: bool = True
     canary_enabled: bool = True
     mcp_scanning_enabled: bool = True
+    pii_redaction_enabled: bool = True
 
     # Behavioral
     behavioral_enabled: bool = True
     system_prompt_mutation_enabled: bool = True
     system_prompt_mutation_mode: str = "block"
+
+    # Blast Radius Guard (Phase 15 — Excessive Agency Prevention)
+    blast_radius_enabled: bool = True
+    blast_radius_session_budget: float = 3.0   # cumulative score before escalating HITL
+
+    # Response-Hold HITL (Phase 19 — True Pre-Execution Gate)
+    # Requires hitl_enabled=True to create approvals.
+    # When enabled, the proxy holds the LLM response BEFORE returning it to the
+    # agent.  The agent never receives tool_calls until a human approves them.
+    # Non-streaming only; streaming hold is a future enhancement (Phase 19.1).
+    response_hold_enabled: bool = False        # off by default; requires hitl_enabled=True
+    response_hold_timeout_s: int = 300         # seconds to wait for human decision (5 min)
+
+    # Sandbox Adapter Framework (Phase 16 — Pre-Execution Dry-Run)
+    # Runs registered adapters (email preview, git dry-run, etc.) before tool execution.
+    # Off by default — enable once adapters are configured for your tool set.
+    sandbox_enabled: bool = False
+    sandbox_min_blast_score: float = 0.30      # only sandbox when blast_score >= this
+    sandbox_timeout_ms: int = 5_000            # hard timeout per adapter (ms)
 
 
 def _from_local_settings(settings) -> SecurityConfig:
@@ -94,8 +115,10 @@ def _from_local_settings(settings) -> SecurityConfig:
         pii_detection_enabled=settings.pii_enabled,
         unicode_stego_enabled=settings.security_unicode_stego_enabled,
         document_scan_enabled=settings.security_document_scan_enabled,
+        multimodal_scan_enabled=settings.security_multimodal_scan_enabled,
         canary_enabled=settings.security_canary_enabled,
         mcp_scanning_enabled=settings.security_mcp_scanning_enabled,
+        pii_redaction_enabled=settings.security_pii_redaction_enabled,
         behavioral_enabled=settings.security_behavioral_enabled,
     )
 

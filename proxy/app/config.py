@@ -28,6 +28,37 @@ class ProxySettings(BaseSettings):
     azure_upstream: str = ""         # set to https://{resource}.openai.azure.com
     ollama_upstream: str = "http://localhost:11434"
 
+    # Google Vertex AI (Phase E3)
+    # Default region/location used when it cannot be extracted from the request path.
+    # The proxy constructs the upstream URL dynamically as:
+    #   https://{location}-aiplatform.googleapis.com
+    # so per-org configuration is not required for multi-region use.
+    vertex_location: str = "us-central1"
+
+    # AWS Bedrock (Phase E2)
+    # Region for the Bedrock runtime endpoint
+    bedrock_region: str = "us-east-1"
+    # Named AWS profile (empty = use boto3 credential chain / IAM role)
+    bedrock_profile: str = ""
+    # Explicit credentials — prefer IAM role or env vars in production
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_session_token: str = ""
+
+    # OpenAI-compatible providers (Phase E1)
+    groq_upstream: str = "https://api.groq.com/openai"
+    mistral_upstream: str = "https://api.mistral.ai"
+    together_upstream: str = "https://api.together.xyz"
+    perplexity_upstream: str = "https://api.perplexity.ai"
+    deepseek_upstream: str = "https://api.deepseek.com"
+    xai_upstream: str = "https://api.x.ai"
+    fireworks_upstream: str = "https://api.fireworks.ai/inference"
+    openrouter_upstream: str = "https://openrouter.ai/api"
+    cerebras_upstream: str = "https://api.cerebras.ai/v1"
+    sambanova_upstream: str = "https://api.sambanova.ai"
+    nvidia_upstream: str = "https://integrate.api.nvidia.com"
+    cohere_upstream: str = "https://api.cohere.com/compatibility"
+
     # Batch transport
     batch_size: int = 10
     batch_flush_interval_s: float = 2.0
@@ -81,7 +112,11 @@ class ProxySettings(BaseSettings):
     security_injection_alert_threshold: float = 0.50
 
     # Credential confidence threshold. Matches below this value are ignored.
-    security_credential_confidence_threshold: float = 0.40
+    # Raised from 0.40 to 0.60: at 0.40, base64-encoded data (certificates,
+    # encoded payloads) near any JSON key named "key" or "token" would fire.
+    # 0.60 requires strong combined signal: high entropy + context keyword OR
+    # high entropy + known structural prefix (sk-, ghp_, AKIA, eyJ, etc.).
+    security_credential_confidence_threshold: float = 0.60
 
     # -------------------------------------------------------------------------
     # Canary token injection (anti-exfiltration)
@@ -165,17 +200,30 @@ class ProxySettings(BaseSettings):
     # (pymupdf + python-docx). Gracefully disabled if deps not installed.
     security_document_scan_enabled: bool = True
 
+    # Scan images in LLM requests for visual prompt injection — EXIF metadata
+    # injection, LSB steganography, QR/barcode payloads, OCR-extracted text,
+    # and low-contrast text overlays. Requires: pip install Pillow (and
+    # optionally pyzbar + pytesseract). Gracefully disabled without them.
+    security_multimodal_scan_enabled: bool = True
+
+    # -------------------------------------------------------------------------
+    # PII Redaction & Tokenization
+    # -------------------------------------------------------------------------
+    # Replace PII in LLM requests with reversible tokens before forwarding to
+    # the provider. Tokens are restored in responses. Org-level mode per PII
+    # type (tokenize | redact | block | allow) is configurable via dashboard.
+    # Custom per-org regex patterns (employee IDs, project codes, etc.) are
+    # also supported and configurable via dashboard.
+    security_pii_redaction_enabled: bool = True
+
     # -------------------------------------------------------------------------
     # Behavioral analytics (Phase 3.3)
+    # Note: Isolation Forest and Markov sequence model removed — both were
+    # statistically fragile (arbitrary thresholds, designed FP rates).
+    # Event-sequence tracking (state.event_type_sequence) is retained for
+    # deterministic loop-protection rules via the policy engine.
     # -------------------------------------------------------------------------
-    # Enable Markov sequence model + Isolation Forest anomaly detection.
     security_behavioral_enabled: bool = True
-    # Minimum sessions before Isolation Forest starts scoring.
-    security_isolation_forest_min_samples: int = 10
-    # Expected fraction of anomalous sessions (IsolationForest contamination).
-    security_isolation_forest_contamination: float = 0.05
-    # Markov: P(to|from) below this threshold triggers an ALERT violation.
-    security_markov_alert_threshold: float = 0.05
 
     # -------------------------------------------------------------------------
     # ML injection classifier (Phase 4)
@@ -388,6 +436,63 @@ class ProxySettings(BaseSettings):
     # e.g. threshold=0.85, discount=0.20 → effective threshold=0.68
     trust_propagation_discount: float = 0.20
 
+    # Note: Refusal Detection (Phase RAG-DoS) was removed — regex-based phrase
+    # matching produced too many FPs ("I cannot help with that", "I recommend",
+    # "potential harm"). No solid non-phrase alternative exists without a
+    # dedicated refusal classifier. RAG-poison DoS is better detected at the
+    # knowledge-base ingestion layer, not via LLM response text analysis.
+
+    # -------------------------------------------------------------------------
+    # Embedding Security (Phase E4)
+    # -------------------------------------------------------------------------
+    # Scan text sent to embedding APIs for PII (email, SSN, credit card, etc.)
+    # before the vector store can persist it.
+    security_embedding_enabled: bool = True
+    # Per-session embedding call count threshold to emit a volume-spike alert.
+    security_embedding_volume_threshold: int = 500
+
+    # -------------------------------------------------------------------------
+    # Image Generation & Audio Security (Phase E5)
+    # -------------------------------------------------------------------------
+    security_image_gen_enabled: bool = True
+    security_audio_enabled: bool = True
+
+    # -------------------------------------------------------------------------
+    # A2A Protocol Security (Phase E7)
+    # -------------------------------------------------------------------------
+    # Intercept Google A2A (Agent-to-Agent) JSON-RPC 2.0 messages.
+    # Scans task messages for prompt injection and PII before forwarding to
+    # the target agent.  Also scans response artifacts for PII leakage.
+    security_a2a_enabled: bool = True
+    # When True: BLOCK outgoing A2A messages where injection is detected.
+    # When False: ALERT only (observe + audit, never block).
+    # Default False: blocking A2A messages can break agent delegation pipelines;
+    # operators should review alerts and tune allowlists before enabling.
+    security_a2a_block_injection: bool = False
+
+    # -------------------------------------------------------------------------
+    # Source Accuracy Detection (Phase H)
+    # -------------------------------------------------------------------------
+    # Detect when an LLM response contradicts or goes beyond information that was
+    # present in the tool results it received (checks response is grounded in source).
+    # MiniCheck NLI (50–150ms on CPU): checks each factual sentence against the
+    #   actual tool result. Requires: pip install minicheck (optional).
+    #   Without MiniCheck installed, source accuracy detection is disabled (fail-open).
+    # Env var prefix kept as AEGIVIS_SECURITY_HALLUCINATION_* for backward compatibility.
+    security_hallucination_enabled: bool = True
+    # "alert": fire violation, allow the response through.
+    # "block": reject the response with HTTP 422 (use cautiously — FP risk).
+    security_hallucination_action: str = "alert"
+    # Rolling window: how many tool results to keep per session for comparison.
+    # Larger = better multi-turn coverage. Smaller = less memory per session.
+    # At ~1500 chars per result (truncated), 20 results ≈ 30 KB per session.
+    security_hallucination_window: int = 20
+    # MiniCheck support score below this = source inaccuracy. 0.35 is conservative
+    # (flags clear contradictions; avoids false-positives on paraphrases).
+    security_hallucination_threshold: float = 0.35
+    # Enable MiniCheck NLI scoring (requires minicheck package).
+    security_hallucination_use_minicheck: bool = True
+
     # -------------------------------------------------------------------------
     # Request body size limit
     # -------------------------------------------------------------------------
@@ -401,6 +506,21 @@ class ProxySettings(BaseSettings):
     # -------------------------------------------------------------------------
     # Max characters to store per thinking block. Truncates before DB write.
     reasoning_trace_max_chars: int = 4000
+
+    # -------------------------------------------------------------------------
+    # Live Model Shadowing (Feature 3)
+    # -------------------------------------------------------------------------
+    # Shadow-route a sample of production requests to a second model.
+    # The primary call is unaffected; the shadow call runs fire-and-forget
+    # after the response is already sent to the agent (zero latency impact).
+    # Results are stored in the backend for comparison analytics.
+    #
+    # Enable:  AEGIVIS_SHADOW_ENABLED=true
+    # Model:   AEGIVIS_SHADOW_MODEL=gpt-4o-mini   (or claude-haiku-4-5, etc.)
+    # Rate:    AEGIVIS_SHADOW_SAMPLE_RATE=0.10     (10% of requests)
+    shadow_enabled: bool = False
+    shadow_model: str = ""          # shadow model name; empty = disabled
+    shadow_sample_rate: float = 0.10  # fraction of requests to shadow (0–1)
 
     # Logging
     log_level: str = "INFO"

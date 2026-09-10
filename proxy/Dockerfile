@@ -48,4 +48,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-deps .
 
 EXPOSE 8080
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "2"]
+# Single worker: session state is kept in-memory (SessionTracker dict).
+# Multiple uvicorn workers = separate OS processes = separate dicts = mutation/canary
+# detection breaks because worker 1 stores a hash that worker 2 never sees.
+# Redis-backed session persistence is work-in-progress; until then 1 worker is required.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

@@ -15,6 +15,11 @@ class EventType(str, Enum):
     AGENT_FINISH = "AGENT_FINISH"
     SYSTEM_ERROR = "SYSTEM_ERROR"
     CHECKPOINT = "CHECKPOINT"
+    EMBEDDING_CALL      = "EMBEDDING_CALL"       # Phase E4
+    IMAGE_GEN_CALL      = "IMAGE_GEN_CALL"       # Phase E5
+    AUDIO_CALL          = "AUDIO_CALL"           # Phase E5
+    A2A_MESSAGE_SEND    = "A2A_MESSAGE_SEND"     # Phase E7
+    A2A_MESSAGE_RECEIVE = "A2A_MESSAGE_RECEIVE"  # Phase E7
 
 
 class InterceptionLayer(str, Enum):

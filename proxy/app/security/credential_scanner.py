@@ -43,8 +43,8 @@ _MIN_LEN: int = 16
 _MAX_LEN: int = 512
 
 # Minimum Shannon entropy (bits/char) to flag a token as a candidate.
-# English text: ~3.0-3.8.  Secrets: typically 4.2-6.0.
-_ENTROPY_THRESHOLD: float = 4.2
+# English text: ~3.0-3.8.  Secrets: typically 4.0-6.0.
+_ENTROPY_THRESHOLD: float = 4.0
 
 # Maximum plausible entropy for normalisation (theoretical max for 95-char printable ASCII = 6.57).
 _ENTROPY_MAX: float = 6.0

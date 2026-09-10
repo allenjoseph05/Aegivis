@@ -272,6 +272,68 @@ class InterceptContext:
             self.transport.enqueue_violation(hv.to_dict())
         return [hv]
 
+    async def maybe_hold_response(
+        self,
+        session_id: str,
+        agent_id: str,
+        provider: str,
+        model: str,
+    ) -> tuple[bool, dict | None]:
+        """
+        Phase 19 — Response-Hold HITL: pre-execution gate for non-streaming responses.
+
+        Called by main.py after process_response() returns, before the LLM
+        response is forwarded to the agent.  If a HITL approval was created
+        during process_response() AND response_hold_enabled is True, this method
+        holds execution, polls the approvals endpoint, and returns a decision.
+
+        Returns:
+            (should_deny=False, None)        — continue; return response to agent.
+            (should_deny=True,  denial_dict) — replace response with synthetic denial.
+
+        The caller is responsible for constructing the FastAPI Response from
+        ``denial_dict``; this keeps FastAPI out of the security module.
+
+        Preconditions:
+            - ``_load_cfg()`` must have been called earlier in the same request
+              (it will be; process_request() always calls it first).
+            - ``state.hitl_pending_approval_id`` is set iff an approval exists.
+        """
+        cfg = await self._load_cfg()
+        if not cfg.response_hold_enabled:
+            return False, None
+
+        state = self.session_tracker.get_state(session_id)
+        approval_id = state.hitl_pending_approval_id
+        if not approval_id:
+            return False, None
+
+        from .security.response_hold import poll_hold_gate, synthesize_denial
+        decision = await poll_hold_gate(
+            approval_id=approval_id,
+            timeout_s=cfg.response_hold_timeout_s,
+            backend_url=settings.backend_url,
+            api_key=settings.backend_api_key,
+        )
+
+        # Always clear the pending ID — polling is complete regardless of outcome.
+        # The existing HITL gate in process_request() checks this slot; clearing
+        # here prevents the next request from being blocked a second time.
+        state.hitl_pending_approval_id = None
+
+        if decision.approved:
+            logger.info(
+                "[RESPONSE-HOLD] Approved: id=%s session=%s latency=%.0fms",
+                approval_id, session_id, decision.latency_ms,
+            )
+            return False, None
+
+        logger.warning(
+            "[RESPONSE-HOLD] Denied: id=%s decision=%s session=%s latency=%.0fms",
+            approval_id, decision.decision, session_id, decision.latency_ms,
+        )
+        return True, synthesize_denial(provider, model)
+
     def _build_llm_call_start(
         self,
         *,
@@ -313,10 +375,7 @@ class InterceptContext:
             sequence_number=seq,
             previous_hash=prev_hash,
         )
-        start_event = self._apply_pii(start_event)
-        start_event = self._sign_event(start_event, prev_hash)
-
-        # Enrich with spawn chain metadata so topology + audit can use it
+        # Enrich with spawn chain metadata BEFORE signing so it is included in the hash
         if state.spawn_depth > 0:
             start_event.setdefault("payload", {}).update({
                 "spawn_depth": state.spawn_depth,
@@ -324,6 +383,8 @@ class InterceptContext:
                 "parent_session_id": state.parent_session_id,
             })
 
+        start_event = self._apply_pii(start_event)
+        start_event = self._sign_event(start_event, prev_hash)
         return start_event
 
     def _handle_error_response(
@@ -556,6 +617,19 @@ class InterceptContext:
                     except Exception as exc:
                         logger.warning("Tool output scan error (continuing): %s", exc)
 
+                # Hook 2-SOURCE-ACCURACY: Accumulate tool result for source accuracy detection (Phase H)
+                # Appended to the session-wide rolling window — never cleared between turns
+                # so that multi-turn responses can be checked against ALL prior tool results.
+                if settings.security_hallucination_enabled and tr.get("content"):
+                    state.session_tool_results.append({
+                        "tool_name": pending["tool_name"],
+                        "content":   tr["content"],
+                    })
+                    # Bound memory: keep only the most recent N results per session
+                    window = settings.security_hallucination_window
+                    if len(state.session_tool_results) > window:
+                        state.session_tool_results = state.session_tool_results[-window:]
+
                 # Hook 2: Taint credentials returned by this tool result
                 if cfg.taint_tracking_enabled and tr.get("content"):
                     try:
@@ -582,8 +656,26 @@ class InterceptContext:
                 if cfg.pdg_enabled and tr.get("content"):
                     try:
                         from .security.session_pdg import classify_tool_trust
+                        from .security.capability_manifest import get_active_manifest as _get_manifest_pdg
                         _pdg_tool_name = pending.get("tool_name", "unknown")
-                        _pdg_trust = classify_tool_trust(_pdg_tool_name)
+                        # Build manifest_tools lookup (cached — no extra network cost)
+                        _pdg_manifest_tools: dict[str, str] | None = None
+                        if settings.manifest_signing_key:
+                            try:
+                                _pdg_m = await _get_manifest_pdg(
+                                    agent_id, self.org_id,
+                                    settings.backend_url, settings.backend_api_key,
+                                    signing_key=settings.manifest_signing_key,
+                                    cache_ttl_s=settings.manifest_cache_ttl_s,
+                                )
+                                if _pdg_m is not None:
+                                    _pdg_manifest_tools = {
+                                        t.name: t.trust_classification
+                                        for t in _pdg_m.permitted_tools
+                                    }
+                            except Exception:
+                                pass
+                        _pdg_trust = classify_tool_trust(_pdg_tool_name, _pdg_manifest_tools)
                         _pdg_source_id = f"tool_result:{_pdg_tool_name}"
                         state.get_pdg().add_source_node(
                             _pdg_source_id, str(tr["content"]),
@@ -644,6 +736,12 @@ class InterceptContext:
                         )
                     except Exception as _pe:
                         logger.debug("PDG system prompt source failed (skipped): %s", _pe)
+
+                # Hook 1-AUTH: Register system prompt intents in authorization chain (Phase 18)
+                try:
+                    state.get_auth_chain().add_system_prompt(system_prompt)
+                except Exception as _ac_sys_exc:
+                    logger.debug("Auth chain system prompt failed (skipped): %s", _ac_sys_exc)
 
                 # --- Trust propagation (Phase 9) ----------------------------------
                 # If this child session's parent was compromised (ML flag or high
@@ -829,6 +927,55 @@ class InterceptContext:
             except Exception as exc:
                 logger.warning("MCP scan error (continuing): %s", exc)
 
+        # --- MCP rug pull detection -------------------------------------------
+        # Detects tool definitions that changed after capability manifest approval.
+        # Runs only when tool definitions have been observed at least once before.
+        if cfg.mcp_scanning_enabled and tools and state.tool_definitions:
+            try:
+                from .security.mcp_scanner import (
+                    hash_tool_definitions as _hash_defs,
+                    detect_rug_pull as _detect_rug_pull,
+                )
+                _rug_pulls = _detect_rug_pull(tools, state.tool_definitions)
+                if _rug_pulls:
+                    _rp_names = [name for name, _, _ in _rug_pulls]
+                    logger.warning(
+                        "[MCP-RUG-PULL:BLOCK] changed_tools=%s session=%s agent=%s",
+                        _rp_names, session_id, agent_id,
+                    )
+                    _rp_detail = "; ".join(
+                        f"{n}: {o[:8]}→{h[:8]}" for n, o, h in _rug_pulls
+                    )
+                    _rp_violation = PolicyViolation(
+                        rule_name="mcp-rug-pull",
+                        action=PolicyAction.BLOCK,
+                        reason=f"Tool definitions changed after approval: {_rp_detail}",
+                        event_type="LLM_CALL_START",
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        org_id=self.org_id,
+                    )
+                    mcp_block_violations.append(_rp_violation)
+                    if settings.violations_enabled:
+                        self.transport.enqueue_violation(_rp_violation.to_dict())
+                    start_event.setdefault("security", {})["mcp_rug_pull"] = {
+                        "detected": True,
+                        "changed_tools": _rp_names,
+                        "detail": _rp_detail,
+                    }
+                else:
+                    # Update snapshot with current definitions (no changes)
+                    state.tool_definitions = _hash_defs(tools)
+            except Exception as exc:
+                logger.warning("MCP rug pull check error (continuing): %s", exc)
+        elif cfg.mcp_scanning_enabled and tools and state.tool_definitions is None:
+            # First observation: record snapshot for future rug-pull comparison
+            try:
+                from .security.mcp_scanner import hash_tool_definitions as _hash_defs
+                state.tool_definitions = _hash_defs(tools)
+            except Exception:
+                pass
+
         # Return early if MCP scan produced a BLOCK — store event for audit trail
         if mcp_block_violations:
             start_event["blocked"] = True
@@ -841,6 +988,60 @@ class InterceptContext:
             state.last_seen_ns = time.time_ns()
             self.transport.enqueue(start_event)
             return session_id, run_id, mcp_block_violations, None
+
+        # --- PII Redaction & Tokenization -----------------------------------
+        # Replace PII in messages with reversible tokens before forwarding.
+        # Must run BEFORE the enforcement scan (scan the redacted messages,
+        # not the raw ones, so PII doesn't influence injection scoring).
+        if cfg.pii_redaction_enabled:
+            try:
+                from .security.pii_redactor import (
+                    redact_messages as _redact_messages,
+                    PIIBlockError as _PIIBlockError,
+                    get_redaction_config as _get_redaction_cfg,
+                )
+                _redaction_cfg = await _get_redaction_cfg(
+                    self.org_id, settings.backend_url, settings.backend_api_key,
+                )
+                if _redaction_cfg.enabled:
+                    _vault = state.get_pii_vault()
+                    messages, _redaction_summary = _redact_messages(messages, _vault, _redaction_cfg)
+                    if _redaction_summary["total_findings"] > 0:
+                        start_event.setdefault("security", {})["pii_redaction"] = _redaction_summary
+                        logger.info(
+                            "[PII-REDACT] %d tokens created session=%s types=%s",
+                            _redaction_summary["total_findings"], session_id,
+                            list(_redaction_summary["by_type"].keys()),
+                        )
+            except Exception as _pii_exc:
+                # PIIBlockError — block the request
+                if hasattr(_pii_exc, "pii_type"):
+                    _pii_v = PolicyViolation(
+                        rule_name="pii-redaction-block",
+                        action=PolicyAction.BLOCK,
+                        reason=f"PII type {_pii_exc.pii_type!r} with mode=block found in request",
+                        event_type="LLM_CALL_START",
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        org_id=self.org_id,
+                    )
+                    start_event["blocked"] = True
+                    start_event["block_reason"] = "pii-redaction-block"
+                    start_event.setdefault("security", {})["pii_redaction"] = {
+                        "blocked": True, "pii_type": _pii_exc.pii_type,
+                    }
+                    seq += 1
+                    prev_hash = start_event["current_hash"]
+                    state.sequence_number = seq
+                    state.last_hash = prev_hash
+                    state.llm_call_count += 1
+                    state.last_seen_ns = time.time_ns()
+                    self.transport.enqueue(start_event)
+                    if settings.violations_enabled:
+                        self.transport.enqueue_violation(_pii_v.to_dict())
+                    return session_id, run_id, [_pii_v], None
+                else:
+                    logger.warning("PII redaction error (continuing): %s", _pii_exc)
 
         # --- Enforcement scan: structural + credential, always runs, <5ms ----
         # Zero ML dependencies. Provides injection_score + credential_detected
@@ -865,6 +1066,97 @@ class InterceptContext:
                 )
         except Exception as exc:
             logger.warning("Enforcement scan error (continuing): %s", exc)
+
+        # --- Auth chain: accumulate user message intents (Phase 18) ---------------
+        # Track what the user has asked for this session so we can detect
+        # TOOL_CALL_START events whose intent class was never requested.
+        # Runs unconditionally — cheap frozenset lookups, no I/O.
+        try:
+            for _ac_msg in messages:
+                if isinstance(_ac_msg, dict) and _ac_msg.get("role") == "user":
+                    _ac_content = _ac_msg.get("content", "")
+                    if isinstance(_ac_content, str) and _ac_content.strip():
+                        state.get_auth_chain().add_user_message(_ac_content)
+                    elif isinstance(_ac_content, list):
+                        # OpenAI vision format: list of content parts
+                        for _ac_part in _ac_content:
+                            if isinstance(_ac_part, dict) and _ac_part.get("type") == "text":
+                                _ac_text = _ac_part.get("text", "")
+                                if _ac_text:
+                                    state.get_auth_chain().add_user_message(_ac_text)
+        except Exception as _ac_exc:
+            logger.debug("Auth chain user message accumulation failed (skipped): %s", _ac_exc)
+
+        # --- Multi-modal scan: visual prompt injection in images (Phase V2) ----
+        # Scans base64 images embedded in the request for EXIF metadata injection,
+        # LSB steganography, QR/barcode payloads, OCR-extracted injection text, and
+        # low-contrast text overlays. Runs only when Pillow is installed; degrades
+        # gracefully otherwise. Uses the enforcement scanner as injection_fn so
+        # flagged image text is scored with the same model as normal request text.
+        if cfg.multimodal_scan_enabled:
+            try:
+                from .security.multimodal import scan_request_images as _mm_scan
+                from .enforcement import scan_messages as _mm_enf_scan
+
+                def _mm_injection_fn(text: str) -> float:
+                    try:
+                        return _mm_enf_scan([{"role": "user", "content": text}]).injection_score
+                    except Exception:
+                        return 0.0
+
+                mm_results = _mm_scan(request_data, _mm_injection_fn)
+                detected = [r for r in mm_results if r.detected]
+                if detected:
+                    worst = max(detected, key=lambda r: r.score)
+                    start_event.setdefault("security", {})["multimodal"] = {
+                        "images_scanned": len(mm_results),
+                        "threats_detected": len(detected),
+                        "top_threat": worst.threat,
+                        "top_score": round(worst.score, 3),
+                        "flags": worst.flags,
+                    }
+                    logger.warning(
+                        "[MULTIMODAL:%s] images=%d threats=%d top_threat=%s score=%.3f "
+                        "session=%s agent=%s",
+                        "BLOCK" if worst.score >= settings.security_injection_block_threshold else "ALERT",
+                        len(mm_results), len(detected), worst.threat, worst.score,
+                        session_id, agent_id,
+                    )
+                    mm_action = (
+                        PolicyAction.BLOCK
+                        if worst.score >= settings.security_injection_block_threshold
+                        else PolicyAction.ALERT
+                    )
+                    mm_v = PolicyViolation(
+                        rule_name="visual-prompt-injection",
+                        action=mm_action,
+                        reason=(
+                            f"Visual prompt injection detected in image: "
+                            f"threat={worst.threat} score={worst.score:.3f} "
+                            f"flags={','.join(worst.flags)}"
+                        ),
+                        event_type="LLM_CALL_START",
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        org_id=self.org_id,
+                    )
+                    if settings.violations_enabled:
+                        self.transport.enqueue_violation(mm_v.to_dict())
+                    if mm_action == PolicyAction.BLOCK:
+                        start_event["blocked"] = True
+                        start_event["block_reason"] = "visual-prompt-injection"
+                        seq += 1
+                        prev_hash = start_event["current_hash"]
+                        state.sequence_number = seq
+                        state.last_hash = prev_hash
+                        state.llm_call_count += 1
+                        state.last_seen_ns = time.time_ns()
+                        self.transport.enqueue(start_event)
+                        return session_id, run_id, [mm_v], None
+                    else:
+                        violations.append(mm_v)
+            except Exception as exc:
+                logger.debug("Multimodal scan error (skipped): %s", exc)
 
         # --- Context-aware injection scoring (multi-turn Crescendo detection) --
         # Track per-turn injection scores. If the rolling average over the last
@@ -984,8 +1276,8 @@ class InterceptContext:
                     session_id, block[0].rule_name, "BLOCK", _inj_score_now
                 )
                 state.trust_score = new_trust
-            except Exception:
-                pass
+            except Exception as _tg_exc:
+                logger.warning("Trust graph violation update failed (continuing): %s", _tg_exc)
             # Store blocked event in audit trail so blocks are fully auditable
             start_event["blocked"] = True
             start_event["block_reason"] = block[0].rule_name
@@ -1000,40 +1292,6 @@ class InterceptContext:
 
         seq += 1
         prev_hash = start_event["current_hash"]
-
-        # --- Markov sequence tracking (Phase 3.3) ---
-        # Score the LLM_CALL_START transition, then record it.
-        if cfg.behavioral_enabled and state.event_type_sequence:
-            try:
-                from .security.markov import score_transition, observe_transition
-                prev_evt = state.event_type_sequence[-1]
-                markov_result = score_transition(
-                    prev_evt, "LLM_CALL_START", agent_id,
-                    threshold=settings.security_markov_alert_threshold,
-                )
-                observe_transition(prev_evt, "LLM_CALL_START", agent_id)
-                if markov_result.is_anomaly:
-                    logger.warning(
-                        "[MARKOV:ALERT] %s->LLM_CALL_START prob=%.4f session=%s agent=%s",
-                        prev_evt, markov_result.probability, session_id, agent_id,
-                    )
-                    if settings.violations_enabled:
-                        mv = PolicyViolation(
-                            rule_name="markov-anomalous-transition",
-                            action=PolicyAction.ALERT,
-                            reason=(
-                                f"Anomalous event sequence: {prev_evt}->LLM_CALL_START "
-                                f"P={markov_result.probability:.4f}"
-                            ),
-                            event_type="LLM_CALL_START",
-                            session_id=session_id,
-                            agent_id=agent_id,
-                            org_id=self.org_id,
-                        )
-                        self.transport.enqueue_violation(mv.to_dict())
-            except Exception as exc:
-                logger.debug("Markov tracking error (skipped): %s", exc)
-        state.event_type_sequence.append("LLM_CALL_START")
 
         # Persist updated state back onto the SessionState object
         state.sequence_number = seq
@@ -1251,11 +1509,23 @@ class InterceptContext:
             state, session_id, agent_id, provider, model, run_id,
             response_data, http_status, seq, prev_hash,
         ):
-            return
+            return []
 
         response_text = response_data.get("response_text")
         finish_reason = response_data.get("finish_reason")
         tool_calls = response_data.get("tool_calls", [])
+
+        # --- PII token restore (post-response) --------------------------------
+        # If we tokenized PII in the request, restore tokens in the LLM's
+        # response so the application receives the original values.
+        # Only applies to "tokenize" mode PII (redact/block are one-way).
+        if cfg.pii_redaction_enabled and state.pii_vault and state.pii_vault.size() > 0:
+            try:
+                if isinstance(response_text, str):
+                    response_text = state.pii_vault.restore(response_text)
+                    response_data = {**response_data, "response_text": response_text}
+            except Exception as _restore_exc:
+                logger.warning("PII token restore error (continuing): %s", _restore_exc)
 
         end_event = self._build_llm_call_end(
             session_id=session_id, agent_id=agent_id, provider=provider, model=model,
@@ -1299,15 +1569,56 @@ class InterceptContext:
             except Exception as exc:
                 logger.warning("Output scan error (continuing): %s", exc)
 
-        # --- Markov: record LLM_CALL_END transition ---
-        if cfg.behavioral_enabled and state.event_type_sequence:
+        # ── Source Accuracy Detection (Phase H) ───────────────────────────────────
+        # Compare the LLM response against the full session-wide tool result window.
+        # Checks whether factual claims in the response are grounded in actual tool outputs.
+        # Catches multi-turn inaccuracies (e.g. turn 5 referencing data fetched in turn 1).
+        if settings.security_hallucination_enabled and state.session_tool_results and response_text:
             try:
-                from .security.markov import score_transition, observe_transition
-                prev_evt = state.event_type_sequence[-1]
-                observe_transition(prev_evt, "LLM_CALL_END", agent_id)
-            except Exception as exc:
-                logger.debug("Markov LLM_CALL_END tracking error (skipped): %s", exc)
-        state.event_type_sequence.append("LLM_CALL_END")
+                from .security.hallucination_detector import (
+                    SourceAccuracyDetector, SourceAccuracyConfig,
+                )
+                h_cfg = SourceAccuracyConfig(
+                    enabled=True,
+                    action=settings.security_hallucination_action,
+                    threshold=settings.security_hallucination_threshold,
+                    use_minicheck=settings.security_hallucination_use_minicheck,
+                )
+                h_result = SourceAccuracyDetector().check(
+                    tool_results=state.session_tool_results,
+                    llm_response=response_text,
+                    config=h_cfg,
+                )
+                # Store findings in end_event.security JSONB
+                # Key kept as "hallucination" for DB backward compatibility
+                if h_result.checked:
+                    end_event.setdefault("security", {})["hallucination"] = h_result.to_dict()
+
+                if h_result.detected:
+                    logger.warning(
+                        "[SOURCE_ACCURACY:%s] findings=%d session=%s agent=%s",
+                        h_result.severity, len(h_result.findings), session_id, agent_id,
+                    )
+                    if settings.violations_enabled:
+                        h_action = PolicyAction.BLOCK if settings.security_hallucination_action == "block" else PolicyAction.ALERT
+                        hv = PolicyViolation(
+                            rule_name="hallucination-detected",
+                            action=h_action,
+                            reason=(
+                                f"LLM response contains {len(h_result.findings)} claim(s) not supported "
+                                f"by tool outputs: severity={h_result.severity}"
+                            ),
+                            event_type="LLM_CALL_END",
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            org_id=self.org_id,
+                        )
+                        self.transport.enqueue_violation(hv.to_dict())
+            except Exception as _he:
+                logger.debug("Source accuracy detection error (skipped): %s", _he)
+            # NOTE: session_tool_results is NOT cleared — accumulates for the full session
+
+        # ── Refusal Detection (Phase RAG-DoS) ─────────────────────────────────
 
         seq += 1
         prev_hash = end_event["current_hash"]
@@ -1389,15 +1700,271 @@ class InterceptContext:
             except Exception as exc:
                 logger.warning("Enforcement tool scan error (continuing): %s", exc)
 
+            # --- Blast Radius Guard (Phase 15 — Excessive Agency Prevention) ----
+            # Classify tool call by (reversibility × scope) BEFORE execution.
+            # CRITICAL (≥0.85): BLOCK + policy violation immediately.
+            # HIGH     (≥0.60): HITL — next LLM call held for human review.
+            # MEDIUM   (≥0.30): ALERT — logged, not blocked.
+            # Session accumulator: when cumulative score > budget, HIGH→HITL.
+            _br_result = None
+            if cfg.blast_radius_enabled:
+                try:
+                    from .security.blast_radius import score_blast_radius as _score_br
+                    _br_args = tc_args if isinstance(tc_args, dict) else {}
+                    _br_result = _score_br(
+                        tc_name,
+                        _br_args,
+                        spawn_depth=state.spawn_depth,
+                        manifest_tools=None,  # manifest_tools integration deferred to Phase 15.1
+                    )
+                    state.blast_radius_cumulative += _br_result.blast_score
+                    tool_start.setdefault("security", {}).update(
+                        {"blast_radius": _br_result.to_dict(),
+                         "blast_radius_cumulative": round(state.blast_radius_cumulative, 4)}
+                    )
+                    if _br_result.risk_level == "CRITICAL":
+                        _br_v = PolicyViolation(
+                            rule_name="excessive-agency-block",
+                            action=PolicyAction.BLOCK,
+                            reason=(
+                                f"Blast radius CRITICAL (score={_br_result.blast_score:.3f}): "
+                                + "; ".join(_br_result.signals[:3])
+                            ),
+                            event_type="TOOL_CALL_START",
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            org_id=self.org_id,
+                        )
+                        logger.warning(
+                            "[BLAST-RADIUS:BLOCK] tool=%s score=%.3f signals=%s session=%s",
+                            tc_name, _br_result.blast_score, _br_result.signals[:2], session_id,
+                        )
+                        if settings.violations_enabled:
+                            self.transport.enqueue_violation(_br_v.to_dict())
+                        _response_violations.append(_br_v)
+                    elif _br_result.risk_level == "MEDIUM":
+                        _br_alert = PolicyViolation(
+                            rule_name="excessive-agency-alert",
+                            action=PolicyAction.ALERT,
+                            reason=(
+                                f"Blast radius MEDIUM (score={_br_result.blast_score:.3f}): "
+                                + "; ".join(_br_result.signals[:3])
+                            ),
+                            event_type="TOOL_CALL_START",
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            org_id=self.org_id,
+                        )
+                        logger.info(
+                            "[BLAST-RADIUS:ALERT] tool=%s score=%.3f session=%s",
+                            tc_name, _br_result.blast_score, session_id,
+                        )
+                        if settings.violations_enabled:
+                            self.transport.enqueue_violation(_br_alert.to_dict())
+                except Exception as _br_exc:
+                    logger.warning("Blast radius scan error (continuing): %s", _br_exc)
+
+            # Early exit: if blast radius already produced a BLOCK, skip the remaining
+            # expensive hooks (sandbox, compound, behavioral). Annotation-only hooks
+            # (rollback gate, auth chain) and the taint/IFC checks still run below
+            # because they annotate the event or may escalate independently.
+            _already_blocked = any(v.action == PolicyAction.BLOCK for v in _response_violations)
+
+            # --- Sandbox Dry-Run (Phase 16 — Pre-Execution Scope Estimation) ----
+            # Runs the first matching sandbox adapter (email preview, git dry-run,
+            # etc.) when the blast radius score meets the configured threshold.
+            # Fail-open: adapter errors / missing git binary → proxy continues.
+            if not _already_blocked and cfg.sandbox_enabled and _br_result is not None and \
+                    _br_result.blast_score >= cfg.sandbox_min_blast_score:
+                try:
+                    from .security.sandbox import SandboxRegistry as _SB_REG
+                    from .security.sandbox import SandboxContext as _SB_CTX
+                    _sb_ctx = _SB_CTX(
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        org_id=self.org_id,
+                        spawn_depth=state.spawn_depth,
+                        timeout_ms=cfg.sandbox_timeout_ms,
+                        blast_score=_br_result.blast_score,
+                        verb_class=_br_result.risk_level.lower(),
+                    )
+                    _sb_args = tc_args if isinstance(tc_args, dict) else {}
+                    _sb_result = await _SB_REG.run(tc_name, _sb_args, _sb_ctx)
+                    if _sb_result is not None:
+                        tool_start.setdefault("security", {})["sandbox"] = _sb_result.to_dict()
+                        if not _sb_result.safe:
+                            _sb_v = PolicyViolation(
+                                rule_name="sandbox-scope-exceeded",
+                                action=PolicyAction.BLOCK,
+                                reason=(
+                                    f"Sandbox dry-run ({_sb_result.adapter}) revealed "
+                                    f"unacceptable scope: {'; '.join(_sb_result.signals[:3])}"
+                                ),
+                                event_type="TOOL_CALL_START",
+                                session_id=session_id,
+                                agent_id=agent_id,
+                                org_id=self.org_id,
+                            )
+                            logger.warning(
+                                "[SANDBOX:BLOCK] adapter=%s tool=%s safe=False signals=%s session=%s",
+                                _sb_result.adapter, tc_name, _sb_result.signals[:2], session_id,
+                            )
+                            if settings.violations_enabled:
+                                self.transport.enqueue_violation(_sb_v.to_dict())
+                            _response_violations.append(_sb_v)
+                except Exception as _sb_exc:
+                    logger.warning("Sandbox dry-run error (continuing): %s", _sb_exc)
+
+            # --- Compound Sequence Detector (Phase 23) ---------------------------
+            # Detects dangerous multi-step action sequences across the session.
+            # A single tool call may be benign; the combination reveals intent.
+            # Runs on every TOOL_CALL_START; O(patterns × history) — both small.
+            # Skip if already blocked — intent history is still updated below.
+            try:
+                from .security.compound_detector import (
+                    classify_tool_intent as _classify_intent,
+                    compound_detector as _compound_det,
+                )
+                _tc_intent = _classify_intent(tc_name)
+                state.intent_history.append(_tc_intent)
+                # Bound history to prevent O(n²) pattern matching on very long sessions
+                if len(state.intent_history) > 500:
+                    state.intent_history = state.intent_history[-500:]
+                # Always update history even when blocked; only evaluate patterns when not blocked
+                _compound_matches = [] if _already_blocked else _compound_det.check(_tc_intent, state.intent_history)
+                if _compound_matches:
+                    tool_start.setdefault("security", {})["compound_sequences"] = [
+                        m.to_dict() for m in _compound_matches
+                    ]
+                    for _cm in _compound_matches:
+                        _cm_v = PolicyViolation(
+                            rule_name="compound-sequence-violation",
+                            action=PolicyAction.ALERT if _cm.severity == "medium"
+                                   else PolicyAction.BLOCK,
+                            reason=(
+                                f"Compound sequence '{_cm.pattern_name}' detected "
+                                f"({_cm.severity}): {_cm.description[:150]}"
+                            ),
+                            event_type="TOOL_CALL_START",
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            org_id=self.org_id,
+                        )
+                        logger.warning(
+                            "[COMPOUND-SEQ:%s] pattern=%s tool=%s session=%s",
+                            _cm.severity.upper(), _cm.pattern_name, tc_name, session_id,
+                        )
+                        if settings.violations_enabled:
+                            self.transport.enqueue_violation(_cm_v.to_dict())
+                        if _cm.severity in ("critical", "high"):
+                            _response_violations.append(_cm_v)
+            except Exception as _csd_exc:
+                logger.warning("Compound sequence detector error (continuing): %s", _csd_exc)
+
+            # --- Behavioral Baseline (Phase 20 — Anomaly Detection) --------------
+            # Track per-tool call counts and flag statistical anomalies vs baseline.
+            # No ML — Welford z-score on historical per-session call counts.
+            # Requires min_observations sessions before baseline activates.
+            # Counter always incremented; anomaly scored only when not already blocked.
+            try:
+                from .security.behavioral_baseline import (
+                    baseline_store as _bl_store,
+                )
+                _tc_count = state.tool_call_counts.get(tc_name, 0) + 1
+                state.tool_call_counts[tc_name] = _tc_count
+                if _already_blocked:
+                    raise StopIteration  # skip anomaly scoring, still updates counter
+                _bl_anomaly = _bl_store.score_anomaly(
+                    org_id, agent_id, tc_name, _tc_count
+                )
+                if _bl_anomaly.has_baseline and _bl_anomaly.is_anomalous:
+                    tool_start.setdefault("security", {})["behavioral_anomaly"] = (
+                        _bl_anomaly.to_dict()
+                    )
+                    _bl_v = PolicyViolation(
+                        rule_name="behavioral-baseline-violation",
+                        action=PolicyAction.BLOCK if _bl_anomaly.should_block
+                               else PolicyAction.ALERT,
+                        reason=_bl_anomaly.reason[:300],
+                        event_type="TOOL_CALL_START",
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        org_id=self.org_id,
+                    )
+                    logger.warning(
+                        "[BASELINE:%s] tool=%s count=%d z=%.1f session=%s",
+                        "BLOCK" if _bl_anomaly.should_block else "ALERT",
+                        tc_name, _tc_count, _bl_anomaly.z_score, session_id,
+                    )
+                    if settings.violations_enabled:
+                        self.transport.enqueue_violation(_bl_v.to_dict())
+                    if _bl_anomaly.should_block:
+                        _response_violations.append(_bl_v)
+            except StopIteration:
+                pass  # already blocked — skip anomaly scoring
+            except Exception as _bl_exc:
+                logger.warning("Behavioral baseline error (continuing): %s", _bl_exc)
+
+            # --- Rollback Readiness Gate (Phase 21 — Reversibility Assessment) --
+            # Assess whether the tool call can be undone if it causes harm.
+            # Structural: verb taxonomy + argument signal checks. No ML, no regex.
+            # Annotates tool_start["security"]["rollback"] for dashboard display.
+            try:
+                from .security.rollback_gate import assess_reversibility as _assess_rb
+                _rb = _assess_rb(tc_name, _br_args)
+                tool_start.setdefault("security", {})["rollback"] = _rb.to_dict()
+                if _rb.is_irreversible:
+                    logger.debug(
+                        "[ROLLBACK:IRREVERSIBLE] tool=%r verb=%r session=%s",
+                        tc_name, _rb.matched_verb, session_id,
+                    )
+            except Exception as _rb_exc:
+                logger.warning("Rollback gate error (continuing): %s", _rb_exc)
+
+            # --- Authorization Chain check (Phase 18) ─────────────────────────
+            # Detect high-risk tool calls with no authorization in conversation history.
+            # Only fires ALERT — never BLOCK on its own (false positive risk).
+            # Cheap: frozenset lookups, no I/O.
+            try:
+                _ac_result = state.get_auth_chain().check_tool_call(tc_name)
+                tool_start.setdefault("security", {})["auth_chain"] = _ac_result.to_dict()
+                if not _ac_result.is_authorized:
+                    logger.warning(
+                        "[AUTH-CHAIN:ALERT] unauthorized-tool-call tool=%s intent=%s session=%s agent=%s",
+                        tc_name, _ac_result.intent_class, session_id, agent_id,
+                    )
+                    if settings.violations_enabled:
+                        _ac_v = PolicyViolation(
+                            rule_name="unauthorized-tool-call",
+                            action=PolicyAction.ALERT,
+                            reason=_ac_result.reason,
+                            event_type="TOOL_CALL_START",
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            org_id=self.org_id,
+                        )
+                        self.transport.enqueue_violation(_ac_v.to_dict())
+            except Exception as _ac_tool_exc:
+                logger.debug("Auth chain tool check failed (skipped): %s", _ac_tool_exc)
+
             # --- HITL gate: create approval request if this tool needs one ------
             # Fires when: tool is in hitl_required_tools list, enforcement
-            # scanner flagged RCE/SSRF, or tainted creds are heading to a
-            # network-sink tool. The agent sees the tool call proceed — but the
-            # NEXT LLM call will be held until a reviewer decides.
+            # scanner flagged RCE/SSRF, tainted creds are heading to a
+            # network-sink tool, or blast radius is HIGH/CRITICAL.
+            # The agent sees the tool call proceed — but the NEXT LLM call
+            # will be held until a reviewer decides.
             if cfg.hitl_enabled and not state.hitl_pending_approval_id:
                 _hitl_trigger: str | None = None
                 if tc_name in settings.hitl_required_tools_set:
                     _hitl_trigger = "hitl_tool_list"
+                elif _br_result is not None and _br_result.should_hitl:
+                    _hitl_trigger = f"blast_radius_{_br_result.risk_level.lower()}"
+                elif (
+                    _br_result is not None
+                    and state.blast_radius_cumulative > cfg.blast_radius_session_budget
+                    and _br_result.verb_risk >= 0.30
+                ):
+                    _hitl_trigger = "blast_radius_budget_exceeded"
                 elif tool_scan is not None and (tool_scan.rce_detected or tool_scan.ssrf_detected):
                     _hitl_trigger = "hitl_score_threshold"
                 elif settings.hitl_on_network_sink and state.taint_tracker:
@@ -1754,25 +2321,6 @@ class InterceptContext:
                     self.transport.enqueue_violation(tp_block[0].to_dict())
                 continue  # Skip this tool call — don't emit or track it
 
-            # --- Markov: record TOOL_CALL_START transition ---
-            if cfg.behavioral_enabled and state.event_type_sequence:
-                try:
-                    from .security.markov import score_transition, observe_transition
-                    prev_evt = state.event_type_sequence[-1]
-                    markov_tc = score_transition(
-                        prev_evt, "TOOL_CALL_START", agent_id,
-                        threshold=settings.security_markov_alert_threshold,
-                    )
-                    observe_transition(prev_evt, "TOOL_CALL_START", agent_id)
-                    state.event_type_sequence.append("TOOL_CALL_START")
-                    if markov_tc.is_anomaly:
-                        logger.warning(
-                            "[MARKOV:ALERT] %s->TOOL_CALL_START prob=%.4f session=%s agent=%s",
-                            prev_evt, markov_tc.probability, session_id, agent_id,
-                        )
-                except Exception as exc:
-                    logger.debug("Markov TOOL_CALL_START tracking error (skipped): %s", exc)
-
             # Increment tool_call_count before policy eval so count-based rules fire correctly
             state.tool_call_count += 1
             tool_violations = self._evaluate_policy(tool_start, state)
@@ -1814,83 +2362,6 @@ class InterceptContext:
                 previous_hash=prev_hash,
             )
             finish_event = self._sign_event(finish_event, prev_hash)
-
-            # --- Markov: record AGENT_FINISH transition ---
-            if cfg.behavioral_enabled and state.event_type_sequence:
-                try:
-                    from .security.markov import score_transition, observe_transition
-                    prev_evt = state.event_type_sequence[-1]
-                    markov_result = score_transition(
-                        prev_evt, "AGENT_FINISH", agent_id,
-                        threshold=settings.security_markov_alert_threshold,
-                    )
-                    observe_transition(prev_evt, "AGENT_FINISH", agent_id)
-                    state.event_type_sequence.append("AGENT_FINISH")
-                    if markov_result.is_anomaly:
-                        logger.warning(
-                            "[MARKOV:ALERT] %s->AGENT_FINISH prob=%.4f session=%s agent=%s",
-                            prev_evt, markov_result.probability, session_id, agent_id,
-                        )
-                        if settings.violations_enabled:
-                            mv = PolicyViolation(
-                                rule_name="markov-anomalous-transition",
-                                action=PolicyAction.ALERT,
-                                reason=(
-                                    f"Anomalous event sequence: {prev_evt}->AGENT_FINISH "
-                                    f"P={markov_result.probability:.4f}"
-                                ),
-                                event_type="AGENT_FINISH",
-                                session_id=session_id,
-                                agent_id=agent_id,
-                                org_id=self.org_id,
-                            )
-                            self.transport.enqueue_violation(mv.to_dict())
-                except Exception as exc:
-                    logger.debug("Markov AGENT_FINISH tracking error (skipped): %s", exc)
-
-            # --- Isolation Forest: score session at completion (Phase 3.3) ---
-            if cfg.behavioral_enabled:
-                try:
-                    from .security.isolation_forest import fit_and_score as _if_score
-                    loop = asyncio.get_running_loop()
-                    error_rate = (
-                        float(state.error_count) / max(state.llm_call_count, 1)
-                    )
-                    if_features = {
-                        "llm_call_count":       float(state.llm_call_count),
-                        "tool_call_rate":       float(state.tool_call_count) / max(state.llm_call_count, 1),
-                        "error_rate":           error_rate,
-                        "session_duration_min": (time.time_ns() - state.started_at_ns) / 6e10,
-                        "max_injection_score":  state.max_injection_score,
-                    }
-                    if_result = await loop.run_in_executor(
-                        None,
-                        lambda features=if_features: _if_score(features),
-                    )
-                    if if_result is not None:
-                        finish_event.setdefault("security", {})["isolation_forest"] = if_result.to_dict()
-                        if if_result.is_anomaly:
-                            logger.warning(
-                                "[ISOLATION-FOREST:ALERT] anomaly_score=%.3f session=%s agent=%s",
-                                if_result.anomaly_score, session_id, agent_id,
-                            )
-                            if settings.violations_enabled:
-                                ifv = PolicyViolation(
-                                    rule_name="isolation-forest-anomaly",
-                                    action=PolicyAction.ALERT,
-                                    reason=(
-                                        f"Session behavioral anomaly: "
-                                        f"score={if_result.anomaly_score:.3f} "
-                                        f"samples_seen={if_result.samples_seen}"
-                                    ),
-                                    event_type="AGENT_FINISH",
-                                    session_id=session_id,
-                                    agent_id=agent_id,
-                                    org_id=self.org_id,
-                                )
-                                self.transport.enqueue_violation(ifv.to_dict())
-                except Exception as exc:
-                    logger.debug("Isolation Forest scoring error (skipped): %s", exc)
 
             seq += 1
             prev_hash = finish_event["current_hash"]

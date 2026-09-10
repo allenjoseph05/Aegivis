@@ -31,7 +31,11 @@ def compute_event_hash(event_dict: dict) -> str:
     The event_dict must include all fields except current_hash.
     Returns hex digest string (64 chars).
     """
-    serialized = _canonical_json(event_dict, exclude_keys={"current_hash"})
+    # Exclude fields that are added after signing:
+    # - current_hash: the hash itself
+    # - security: always populated post-hoc by enforcement hooks after _sign_event
+    # - received_at: added by the backend ORM, never present at proxy sign time
+    serialized = _canonical_json(event_dict, exclude_keys={"current_hash", "security", "received_at"})
     return hashlib.sha256(serialized).hexdigest()
 
 
