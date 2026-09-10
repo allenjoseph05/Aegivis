@@ -74,6 +74,19 @@ redis = [
     # Install with: pip install 'aegivis-proxy[redis]'
     "redis[asyncio]>=5.0",
 ]
+bedrock = [
+    # AWS Bedrock provider support (Phase E2).
+    # Requires AWS credentials: IAM role, env vars, or AEGIVIS_BEDROCK_PROFILE.
+    # Install with: pip install 'aegivis-proxy[bedrock]'
+    "boto3>=1.28.0",
+]
+hallucination = [
+    # MiniCheck-DeBERTa NLI scorer for hallucination detection (Phase H).
+    # GPT-4 accuracy at 400x lower cost. Apache 2.0. ~355 MB model download.
+    # CPU inference: 50–150ms per response. Gracefully disabled if not installed.
+    # Install with: pip install 'aegivis-proxy[hallucination]'
+    "minicheck>=0.1.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
