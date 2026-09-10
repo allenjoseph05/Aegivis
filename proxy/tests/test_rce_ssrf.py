@@ -914,25 +914,29 @@ class TestRceSafeContextDampening:
     """
 
     def test_review_code_with_os_system_not_detected(self):
-        result = rce_scan("review_code", {"code": "import os\nos.system('ls')"})
+        manifest = {"review_code": {"op_type": "transform"}}
+        result = rce_scan("review_code", {"code": "import os\nos.system('ls')"}, manifest_tools=manifest)
         assert result.detected is False, (
             f"review_code should not block on os.system analysis, conf={result.confidence}"
         )
 
     def test_audit_code_with_eval_not_detected(self):
-        result = rce_scan("audit_code", {"code": "eval(input())"})
+        manifest = {"audit_code": {"op_type": "transform"}}
+        result = rce_scan("audit_code", {"code": "eval(input())"}, manifest_tools=manifest)
         assert result.detected is False, (
             f"audit_code should not block on eval analysis, conf={result.confidence}"
         )
 
     def test_read_file_with_exec_not_detected(self):
-        result = rce_scan("read_file", {"content": "import subprocess\nsubprocess.run(['ls'])"})
+        manifest = {"read_file": {"op_type": "read"}}
+        result = rce_scan("read_file", {"content": "import subprocess\nsubprocess.run(['ls'])"}, manifest_tools=manifest)
         assert result.detected is False, (
             f"read_file should not block on subprocess analysis, conf={result.confidence}"
         )
 
     def test_explain_code_with_dangerous_pattern(self):
-        result = rce_scan("explain_code", {"code": "exec(compile('import os', '<s>', 'exec'))"})
+        manifest = {"explain_code": {"op_type": "transform"}}
+        result = rce_scan("explain_code", {"code": "exec(compile('import os', '<s>', 'exec'))"}, manifest_tools=manifest)
         assert result.detected is False, (
             f"explain_code should not block on exec analysis, conf={result.confidence}"
         )
