@@ -13,6 +13,13 @@ Quick start::
         s.annotate("Starting task")
         result = run_my_agent()
 
+Zero-config interceptor (no proxy URL required)::
+
+    import aegivis.intercept   # one import — all LLM calls captured automatically
+
+    # Supports: anthropic, openai, LangChain, AutoGen, CrewAI, LlamaIndex,
+    # LiteLLM, Pydantic AI, smolagents, and any httpx-based framework.
+
 Tool instrumentation (captures actual tool execution, not just LLM intent)::
 
     from aegivis import instrument
