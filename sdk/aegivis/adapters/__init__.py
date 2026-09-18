@@ -28,4 +28,10 @@ crewai
     ``AegivisCrewAICallback`` — CrewAI ``step_callback`` that emits
     ``AGENT_THOUGHT`` events for every agent step and task completion.
     Install: ``pip install 'aegivis[crewai]'``
+
+litellm
+    ``AegivisLiteLLMCallback`` — LiteLLM ``CustomLogger`` that emits
+    ``LLM_CALL_START`` / ``LLM_CALL_END`` / ``LLM_CALL_ERROR`` events.
+    Covers CrewAI, LlamaIndex, Agno, Haystack and any litellm-based framework.
+    Install: ``pip install 'aegivis[litellm]'``
 """
