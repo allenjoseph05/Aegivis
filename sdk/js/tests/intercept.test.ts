@@ -150,10 +150,18 @@ describe('fetch interception', () => {
   // install() replaces globalThis.fetch with its wrapper, so the mock helpers
   // are only reachable through this reference.
   let mockFetch: ReturnType<typeof vi.fn>;
+  let prevBackendUrl: string | undefined;
 
   beforeEach(() => {
     fetchCalls = [];
     fireCalls  = [];
+
+    // fire() posts through the original fetch — the same mock these tests
+    // install. Blank the backend URL so telemetry no-ops and the mock sees
+    // provider traffic only; otherwise an ingest POST consumes overrides
+    // registered with mockImplementationOnce.
+    prevBackendUrl = process.env['AEGIVIS_BACKEND_URL'];
+    process.env['AEGIVIS_BACKEND_URL'] = '';
 
     // Uninstall to get a clean state, then mock original fetch
     uninstall();
@@ -179,6 +187,9 @@ describe('fetch interception', () => {
   afterEach(() => {
     uninstall();
     (globalThis as Record<string, unknown>)['_aegivis_fetch_patched'] = false;
+
+    if (prevBackendUrl === undefined) delete process.env['AEGIVIS_BACKEND_URL'];
+    else process.env['AEGIVIS_BACKEND_URL'] = prevBackendUrl;
   });
 
   it('passes through non-LLM requests unchanged', async () => {
