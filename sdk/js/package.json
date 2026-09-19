@@ -1,0 +1,76 @@
+{
+  "name": "@aegivis/sdk",
+  "version": "2.0.0",
+  "description": "Aegivis JavaScript/TypeScript SDK — universal AI agent observability and security",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    },
+    "./intercept": {
+      "import": "./dist/intercept.js",
+      "require": "./dist/intercept.cjs",
+      "types": "./dist/intercept.d.ts"
+    },
+    "./adapters/langchain": {
+      "import": "./dist/adapters/langchain.js",
+      "require": "./dist/adapters/langchain.cjs",
+      "types": "./dist/adapters/langchain.d.ts"
+    },
+    "./adapters/openai": {
+      "import": "./dist/adapters/openai.js",
+      "require": "./dist/adapters/openai.cjs",
+      "types": "./dist/adapters/openai.d.ts"
+    },
+    "./adapters/vercel-ai": {
+      "import": "./dist/adapters/vercel-ai.js",
+      "require": "./dist/adapters/vercel-ai.cjs",
+      "types": "./dist/adapters/vercel-ai.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsup --watch"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0",
+    "tsup": "^8.0.0"
+  },
+  "peerDependencies": {
+    "@langchain/core": ">=0.2.0",
+    "openai": ">=4.0.0",
+    "ai": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@langchain/core": { "optional": true },
+    "openai": { "optional": true },
+    "ai": { "optional": true }
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "BUSL-1.1",
+  "keywords": [
+    "ai", "agent", "security", "observability", "llm", "monitoring",
+    "langchain", "openai", "anthropic", "vercel-ai"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/allenjoseph05/aegivis"
+  }
+}
