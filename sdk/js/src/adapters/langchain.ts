@@ -60,11 +60,16 @@ export class AegivisLangChain {
     extraParams?: Record<string, unknown>,
   ): Promise<void> {
     this._timings.set(runId, Date.now());
+
+    const invocationParams = extraParams?.['invocation_params'] as Record<string, unknown> | undefined;
+    const llmId            = llm['id'] as unknown[] | undefined;
+    const llmIdLeaf        = llmId?.length ? llmId[llmId.length - 1] : undefined;
+
     fire(
       'LLM_CALL_START',
       {
         provider:             'langchain',
-        model:                String(extraParams?.['invocation_params']?.['model_name'] ?? llm['id']?.[llm['id']?.length - 1] ?? ''),
+        model:                String(invocationParams?.['model_name'] ?? llmIdLeaf ?? ''),
         user_message_preview: prompts[0]?.slice(0, 500) ?? '',
         message_count:        prompts.length,
         source:               'langchain-callback',
@@ -83,7 +88,8 @@ export class AegivisLangChain {
 
     const generations = (output['generations'] as Array<Array<Record<string, unknown>>>) ?? [];
     const firstGen    = generations[0]?.[0];
-    const text        = String(firstGen?.['text'] ?? firstGen?.['message']?.['content'] ?? '');
+    const firstMessage = firstGen?.['message'] as Record<string, unknown> | undefined;
+    const text         = String(firstGen?.['text'] ?? firstMessage?.['content'] ?? '');
 
     const llmOutput = (output['llmOutput'] as Record<string, unknown>) ?? {};
     const usage     = (llmOutput['tokenUsage'] as Record<string, unknown>) ?? {};
