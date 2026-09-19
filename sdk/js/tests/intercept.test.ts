@@ -147,6 +147,9 @@ describe('install()', () => {
 describe('fetch interception', () => {
   let fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
   let fireCalls:  Array<{ type: string; payload: Record<string, unknown> }> = [];
+  // install() replaces globalThis.fetch with its wrapper, so the mock helpers
+  // are only reachable through this reference.
+  let mockFetch: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     fetchCalls = [];
@@ -157,7 +160,7 @@ describe('fetch interception', () => {
     (globalThis as Record<string, unknown>)['_aegivis_fetch_patched'] = false;
 
     // Mock fetch
-    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       fetchCalls.push({ url: String(input), init });
       return new Response(JSON.stringify({
         model:     'claude-opus-4-6',
@@ -167,7 +170,8 @@ describe('fetch interception', () => {
       }), {
         headers: { 'content-type': 'application/json' },
       });
-    }) as typeof fetch;
+    });
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
 
     install();
   });
@@ -194,7 +198,10 @@ describe('fetch interception', () => {
       body:   JSON.stringify({ model: 'claude-opus-4-6', messages: [{ role: 'user', content: 'hi' }] }),
     });
 
-    expect(fetchCalls.length).toBe(1);
+    // fire() posts LLM_CALL_START/END through the original fetch, which is this
+    // same mock, so count only the calls that reached the provider.
+    const providerCalls = fetchCalls.filter((c) => c.url.includes('api.anthropic.com'));
+    expect(providerCalls.length).toBe(1);
     expect(response.ok).toBe(true);
 
     // Response body should still be readable
@@ -203,7 +210,7 @@ describe('fetch interception', () => {
   });
 
   it('does not consume streaming response body', async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementationOnce(
+    mockFetch.mockImplementationOnce(
       async () => new Response(null, {
         headers: { 'content-type': 'text/event-stream' },
       }),
@@ -219,7 +226,7 @@ describe('fetch interception', () => {
   });
 
   it('re-throws errors from original fetch', async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementationOnce(
+    mockFetch.mockImplementationOnce(
       async () => { throw new Error('Network failure'); },
     );
 
