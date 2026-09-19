@@ -171,6 +171,9 @@ async function readResponseBody(response: Response): Promise<Record<string, unkn
  * Patch globalThis.fetch. Idempotent — safe to call multiple times.
  * Returns true if patched, false if fetch is unavailable or disabled.
  */
+// The exact globalThis.fetch reference replaced by install(), restored by uninstall().
+let _preInstallFetch: typeof fetch | null = null;
+
 export function install(): boolean {
   if (!isEnabled()) return false;
 
@@ -181,6 +184,7 @@ export function install(): boolean {
   // Save original BEFORE patching — transport.ts uses this to post events
   // without re-entering our interceptor.
   const originalFetch = globalThis.fetch.bind(globalThis);
+  _preInstallFetch = globalThis.fetch;
   initTransport(originalFetch);
 
   // Compute skip-hosts set (localhost + Aegivis backend host).
@@ -256,11 +260,14 @@ export function install(): boolean {
 }
 
 /**
- * Remove the fetch patch.  The original fetch reference is lost after patching,
- * so the module-level originalFetch closure is still used internally but the
- * public-facing globalThis.fetch is reset to a pass-through after this call.
+ * Remove the fetch patch and restore the exact globalThis.fetch reference that
+ * install() replaced. Safe to call when not installed.
  */
 export function uninstall(): void {
+  if (_preInstallFetch) {
+    globalThis.fetch = _preInstallFetch;
+    _preInstallFetch = null;
+  }
   (globalThis as Record<string, unknown>)['_aegivis_fetch_patched'] = false;
 }
 
