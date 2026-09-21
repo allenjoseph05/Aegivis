@@ -51,6 +51,15 @@ class ScanConfig:
     api_key: str = ""
     """API key for the backend (optional)."""
 
+    rag_poison_alert_threshold: float = 0.35
+    """RAG-poison score threshold for ALERT (document flagged, write allowed).
+    Score is the multiplicative co-occurrence of safety-framing + harm-topic signals
+    (Li et al., arXiv:2603.03919).  Raise to reduce false positives."""
+
+    rag_poison_block_threshold: float = 0.70
+    """RAG-poison score threshold for BLOCK (MemoryInjectionError raised).
+    The document is rejected at ingestion time before it reaches the vector store."""
+
 
 # ─── Exception ─────────────────────────────────────────────────────────────────
 
