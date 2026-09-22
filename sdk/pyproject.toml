@@ -27,6 +27,10 @@ langchain = ["langchain-core>=0.2.0"]
 openai-agents = ["openai-agents>=0.0.3"]
 autogen = ["pyautogen>=0.2.0"]
 crewai = ["crewai>=0.28.0"]
+pydantic-ai = ["pydantic-ai>=0.0.20"]
+google-adk = ["google-adk>=0.3.0"]
+smolagents = ["smolagents>=1.0.0"]
+haystack = ["haystack-ai>=2.0.0"]
 
 [project.scripts]
 aegivis = "aegivis.cli.verify:main"
